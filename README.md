@@ -9,14 +9,8 @@ See [PLAN.md](PLAN.md) for the full design. Built so far: **Phase 1** (capture, 
 1. Create a project at [supabase.com](https://supabase.com), region **West US (North California)**.
 2. **SQL Editor** → paste and run [`0001_init.sql`](supabase/migrations/0001_init.sql), then [`0002_brain_map.sql`](supabase/migrations/0002_brain_map.sql), in that order.
 3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up". Leave the **Email** provider itself **enabled**.
-4. **Authentication → Users → Add user**: add your own email (auto-confirm).
-5. **Authentication → Emails → Magic Link** template: replace the body with something containing `{{ .Token }}`, e.g.
-   ```html
-   <h2>Your 2nd Brain code</h2>
-   <p style="font-size:24px;letter-spacing:4px"><b>{{ .Token }}</b></p>
-   ```
-   (Without this, Supabase emails a link instead of a code, and links don't work in the home-screen app.)
-6. **Project Settings → API Keys**: copy the Project URL, **publishable** key and **secret** key.
+4. **Authentication → Users → Add user → Create new user**: your email + a strong password, with **Auto Confirm User** checked. That's your login (no emails are ever sent, so no SMTP setup is needed).
+5. **Project Settings → API Keys**: copy the Project URL, **publishable** key and **secret** key.
 
 ### 2. Voyage AI
 Create an API key at [voyageai.com](https://www.voyageai.com). Adding a card is optional; it lifts the free 3 requests/min limit (cost stays ~$0).
@@ -30,7 +24,7 @@ npm run dev                  # http://localhost:3000
 
 #### Fully local (no cloud accounts)
 With Docker running, `npx supabase start` runs Supabase locally with both migrations applied
-(sign-in emails land in Mailpit at http://127.0.0.1:54324). Point the `NEXT_PUBLIC_SUPABASE_*` /
+(create a user in Studio at http://127.0.0.1:54323 → Authentication). Point the `NEXT_PUBLIC_SUPABASE_*` /
 `SUPABASE_SECRET_KEY` env vars at the printed local values. If `VOYAGE_API_KEY` is empty in
 development, a crude offline mock embedding is used so everything still works.
 
@@ -40,7 +34,7 @@ development, a crude offline mock embedding is used so everything still works.
 3. The daily cron in [`vercel.json`](vercel.json) keeps Supabase from pausing and backfills any logs that failed to embed.
 
 ### 5. Install on your phone
-Open the deployed URL in **Safari** → Share → **Add to Home Screen** → open the app from the icon and sign in **there** (the home-screen app has its own storage, separate from Safari).
+Open the deployed URL in **Safari** → Share → **Add to Home Screen** → open the app from the icon and sign in **there** (the home-screen app has its own storage, separate from Safari). Save the password to Keychain when iOS offers.
 
 ## Backups
 **Export** (top right) downloads every log as JSON; `/api/export?format=md` gives Markdown. Images stay in Supabase Storage.
@@ -51,7 +45,7 @@ src/proxy.ts                 session refresh + login gate
 src/app/actions.ts           create / update / delete / retry-embed
 src/app/page.tsx             quick-add, search, recent list
 src/app/log/[id]/page.tsx    detail, edit, related logs
-src/app/login/page.tsx       email OTP sign-in
+src/app/login/page.tsx       email + password sign-in
 src/app/map/page.tsx         brain map (Phase 2)
 src/components/map/          Sigma.js map: layout, highlighting, search-to-zoom
 src/lib/graph.ts             builds the graph: edge selection, placement, clusters

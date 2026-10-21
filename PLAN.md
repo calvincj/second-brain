@@ -19,7 +19,7 @@ Log facts, stats, and phenomena from laptop or phone; look them up by term; brow
 | Hosting | Vercel | Git-push deploy, daily cron |
 
 ## Auth & security
-- Supabase **email OTP code**. Magic links won't work, because they open in Safari, outside the home-screen app's storage. Edit the email template to include `{{ .Token }}`.
+- Supabase **email + password** (single account created in the dashboard). Magic links won't work, because they open in Safari, outside the home-screen app's storage; OTP codes would need custom SMTP to edit the email template. Passwords need no email at all and iOS Keychain autofills them.
 - Use the new **publishable/secret API keys** (`sb_publishable_…` / `sb_secret_…`), not the legacy `anon`/`service_role` JWTs (deprecated late 2026). Secret key and Voyage key live only in Vercel env vars / `.env.local` (gitignored).
 - Signups disabled. RLS on all tables and the Storage bucket.
 - Private image bucket; signed URLs generated in batch for lists.
@@ -68,7 +68,7 @@ log_neighbors                    -- DIRECTED: each log's own top-k, never bumped
 
 ## Phases
 **Phase 1: Capture, search, related (weekend-sized)**
-Supabase project (pgvector, RLS, bucket, signups off, OTP template) · Next.js scaffold · OTP login · manifest/icons · quick-add (caption, tags, link, image resize, draft autosave) · insert-then-embed · list view · hybrid search · detail + related logs · edit/delete · JSON/Markdown export · daily cron (keep-alive + backfill) · deploy · install on phone. ✅ Built.
+Supabase project (pgvector, RLS, bucket, signups off) · Next.js scaffold · password login · manifest/icons · quick-add (caption, tags, link, image resize, draft autosave) · insert-then-embed · list view · hybrid search · detail + related logs · edit/delete · JSON/Markdown export · daily cron (keep-alive + backfill) · deploy · install on phone. ✅ Built.
 
 **Phase 2: Brain map**
 `log_neighbors` · Sigma.js view · ForceAtlas2 worker · auto re-layout + bulk save · interaction-lit edges · search-to-zoom · mobile tuning. ✅ Built (Louvain cluster colouring pulled forward from Phase 3).
@@ -78,8 +78,7 @@ Optional Claude cluster names · vision caption suggestions for screenshots · a
 
 ## Verify before building
 - Voyage free-tier rate limits without a card (reportedly ~3 RPM), which affects backfill. Add a card or throttle.
-- Supabase OTP template includes `{{ .Token }}`.
-- Sign in from inside the installed home-screen app, not Safari.
+- Sign in from inside the installed home-screen app, not Safari (save the password to Keychain).
 
 ## Non-goals
 3D view, native apps, share sheet, offline queue, long-form notes. Scale target ~10k logs.
