@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🧠 2nd Brain
 
-## Getting Started
+Log facts, stats and phenomena from laptop or phone. Find them by term or by idea.
+See [PLAN.md](PLAN.md) for the full design. This is **Phase 1**: capture, search, related logs.
 
-First, run the development server:
+## Setup
 
+### 1. Supabase
+1. Create a project at [supabase.com](https://supabase.com), region **West US (North California)**.
+2. **SQL Editor** → paste and run [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql).
+3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up".
+4. **Authentication → Users → Add user**: add your own email (auto-confirm).
+5. **Authentication → Emails → Magic Link** template: replace the body with something containing `{{ .Token }}`, e.g.
+   ```html
+   <h2>Your 2nd Brain code</h2>
+   <p style="font-size:24px;letter-spacing:4px"><b>{{ .Token }}</b></p>
+   ```
+   (Without this, Supabase emails a link instead of a code, and links don't work in the home-screen app.)
+6. **Project Settings → API Keys**: copy the Project URL, **publishable** key and **secret** key.
+
+### 2. Voyage AI
+Create an API key at [voyageai.com](https://www.voyageai.com). Adding a card is optional; it lifts the free 3 requests/min limit (cost stays ~$0).
+
+### 3. Local env
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local   # already done; fill in the values
+openssl rand -hex 32         # use as CRON_SECRET
+npm run dev                  # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 4. Deploy (Vercel)
+1. Push this repo to GitHub, import it in Vercel.
+2. Add the same five env vars in Vercel → Settings → Environment Variables.
+3. The daily cron in [`vercel.json`](vercel.json) keeps Supabase from pausing and backfills any logs that failed to embed.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 5. Install on your phone
+Open the deployed URL in **Safari** → Share → **Add to Home Screen** → open the app from the icon and sign in **there** (the home-screen app has its own storage, separate from Safari).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Backups
+**Export** (top right) downloads every log as JSON; `/api/export?format=md` gives Markdown. Images stay in Supabase Storage.
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Layout
+```
+src/proxy.ts                 session refresh + login gate
+src/app/actions.ts           create / update / delete / retry-embed
+src/app/page.tsx             quick-add, search, recent list
+src/app/log/[id]/page.tsx    detail, edit, related logs
+src/app/login/page.tsx       email OTP sign-in
+src/app/api/cron             keep-alive + embedding backfill
+src/app/api/export           JSON / Markdown export
+src/lib/embeddings.ts        Voyage client
+src/lib/queries.ts           reads (hybrid search, related, signed image URLs)
+supabase/migrations/         schema, RLS, search functions, storage bucket
+```
+# second-brain
