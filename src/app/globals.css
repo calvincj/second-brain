@@ -1,26 +1,53 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --bg: #f7f7fb;
+  --surface: #ffffff;
+  --surface-2: #f0f0f6;
+  --border: #e3e3ec;
+  --text: #16161d;
+  --muted: #6b6b7b;
+  --accent: #6d4aff;
+  --accent-soft: #ede8ff;
+  --danger: #d6334b;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --bg: #0b0b12;
+    --surface: #14141e;
+    --surface-2: #1c1c29;
+    --border: #2a2a3a;
+    --text: #ececf3;
+    --muted: #8d8da3;
+    --accent: #9b85ff;
+    --accent-soft: #241d45;
+    --danger: #ff6b81;
   }
 }
 
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* iOS zooms into inputs under 16px; keep form text at 16px. */
+input,
+textarea,
+select {
+  font-size: 16px;
 }

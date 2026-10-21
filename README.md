@@ -1,14 +1,14 @@
 # 🧠 2nd Brain
 
 Log facts, stats and phenomena from laptop or phone. Find them by term or by idea.
-See [PLAN.md](PLAN.md) for the full design. This is **Phase 1**: capture, search, related logs.
+See [PLAN.md](PLAN.md) for the full design. Built so far: **Phase 1** (capture, search, related logs) and **Phase 2** (the brain map at `/map`).
 
 ## Setup
 
 ### 1. Supabase
 1. Create a project at [supabase.com](https://supabase.com), region **West US (North California)**.
-2. **SQL Editor** → paste and run [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql).
-3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up".
+2. **SQL Editor** → paste and run [`0001_init.sql`](supabase/migrations/0001_init.sql), then [`0002_brain_map.sql`](supabase/migrations/0002_brain_map.sql), in that order.
+3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up". Leave the **Email** provider itself **enabled**.
 4. **Authentication → Users → Add user**: add your own email (auto-confirm).
 5. **Authentication → Emails → Magic Link** template: replace the body with something containing `{{ .Token }}`, e.g.
    ```html
@@ -28,6 +28,12 @@ openssl rand -hex 32         # use as CRON_SECRET
 npm run dev                  # http://localhost:3000
 ```
 
+#### Fully local (no cloud accounts)
+With Docker running, `npx supabase start` runs Supabase locally with both migrations applied
+(sign-in emails land in Mailpit at http://127.0.0.1:54324). Point the `NEXT_PUBLIC_SUPABASE_*` /
+`SUPABASE_SECRET_KEY` env vars at the printed local values. If `VOYAGE_API_KEY` is empty in
+development, a crude offline mock embedding is used so everything still works.
+
 ### 4. Deploy (Vercel)
 1. Push this repo to GitHub, import it in Vercel.
 2. Add the same five env vars in Vercel → Settings → Environment Variables.
@@ -46,10 +52,12 @@ src/app/actions.ts           create / update / delete / retry-embed
 src/app/page.tsx             quick-add, search, recent list
 src/app/log/[id]/page.tsx    detail, edit, related logs
 src/app/login/page.tsx       email OTP sign-in
-src/app/api/cron             keep-alive + embedding backfill
+src/app/map/page.tsx         brain map (Phase 2)
+src/components/map/          Sigma.js map: layout, highlighting, search-to-zoom
+src/lib/graph.ts             builds the graph: edge selection, placement, clusters
+src/app/api/cron             keep-alive, embedding backfill, neighbour rebuild
 src/app/api/export           JSON / Markdown export
 src/lib/embeddings.ts        Voyage client
 src/lib/queries.ts           reads (hybrid search, related, signed image URLs)
-supabase/migrations/         schema, RLS, search functions, storage bucket
+supabase/migrations/         schema, RLS, search, neighbours, storage bucket
 ```
-# second-brain
