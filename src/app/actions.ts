@@ -239,6 +239,15 @@ export async function addTags(id: string, tags: string[]): Promise<string[] | nu
 }
 
 export async function getLogDetail(id: string): Promise<LogWithImage | null> {
-  await requireUser();
+  const { supabase } = await requireUser();
+  // Remember when it was last looked at (for "a memory stirs"); ignored if
+  // migration 0007 hasn't been run.
+  await supabase.from("logs").update({ last_viewed_at: new Date().toISOString() }).eq("id", id);
   return getLog(id);
+}
+
+// Which layout rules the saved positions follow, shared by every device.
+export async function saveLayoutVersion(version: string) {
+  const { supabase, user } = await requireUser();
+  await supabase.from("brain_settings").upsert({ user_id: user.id, layout_version: version, updated_at: new Date().toISOString() });
 }

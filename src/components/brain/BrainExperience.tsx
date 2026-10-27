@@ -3,7 +3,17 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition } from "react";
-import { addTags, deleteLogInPlace, getLogDetail, restoreLog, savePositions, searchMap, signOut, type ActionResult } from "@/app/actions";
+import {
+  addTags,
+  deleteLogInPlace,
+  getLogDetail,
+  restoreLog,
+  saveLayoutVersion,
+  savePositions,
+  searchMap,
+  signOut,
+  type ActionResult,
+} from "@/app/actions";
 import { LogForm } from "@/components/LogForm";
 import type { BrainHandle, RemovedThought } from "@/components/brain/Brain3D";
 import { SearchResults } from "@/components/brain/SearchResults";
@@ -30,7 +40,7 @@ function BrainLoading() {
 
 type Sheet = { kind: "node"; id: string } | { kind: "region"; id: number } | { kind: "capture"; prefill: string } | null;
 
-type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[]; startCapture?: boolean };
+type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[]; layoutVersion: string | null; startCapture?: boolean };
 
 type Toast = { text: string; id?: string; suggestions?: string[]; action?: { label: string; run: () => void } };
 
@@ -44,6 +54,30 @@ function readRecent(): string[] {
   }
 }
 
+// "A memory stirs": an embedded thought at least 2 days old, not looked at in
+// a week, weighted toward older ones and bridges between regions.
+function pickMemory(m: BrainModel, now: number): { id: string; ago: string } | null {
+  const day = 864e5;
+  const byId = new Map(m.nodes.map((n) => [n.id, n]));
+  const bridgeIds = new Set<string>();
+  for (const l of m.links) {
+    const s = typeof l.source === "string" ? l.source : l.source.id;
+    const t = typeof l.target === "string" ? l.target : l.target.id;
+    const a = byId.get(s);
+    const b = byId.get(t);
+    if (a?.region != null && b?.region != null && a.region !== b.region) bridgeIds.add(s).add(t);
+  }
+  const candidates = m.nodes
+    .filter((n) => n.embedded && n.createdAt && now - Date.parse(n.createdAt) > 2 * day)
+    .filter((n) => !n.lastViewedAt || now - Date.parse(n.lastViewedAt) > 7 * day)
+    .map((n) => ({ n, w: Math.log(2 + (now - Date.parse(n.createdAt!)) / day) * (bridgeIds.has(n.id) ? 2 : 1) * Math.random() }));
+  if (!candidates.length) return null;
+  const pick = candidates.sort((a, b) => b.w - a.w)[0].n;
+  const days = Math.round((now - Date.parse(pick.createdAt!)) / day);
+  const ago = days < 7 ? `${days} days ago` : days < 60 ? `${Math.round(days / 7)} weeks ago` : `${Math.round(days / 30)} months ago`;
+  return { id: pick.id, ago };
+}
+
 function rememberSearch(q: string) {
   try {
     const next = [q, ...readRecent().filter((r) => r.toLowerCase() !== q.toLowerCase())].slice(0, 8);
@@ -53,7 +87,7 @@ function rememberSearch(q: string) {
   }
 }
 
-export function BrainExperience({ userId, nodes, edges, startCapture = false }: Props) {
+export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapture = false }: Props) {
   const brain = useRef<BrainHandle>(null);
   // The renderer owns the live model after mount (it adds new thoughts itself),
   // so it gets a stable initial model; the UI keeps a copy refreshed on births.
@@ -84,6 +118,7 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
   const selectedRef = useRef<string | null>(null);
   const sheetRef = useRef<Sheet>(null);
   const birthTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const measureRef = useRef<() => void>(() => {});
   const pendingTags = useRef<{ id: string; tags: string[]; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // Server renders without the hint; the browser checks if it was dismissed.
   const hintStored = useSyncExternalStore(
@@ -182,6 +217,7 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
   // --- Selecting a thought: it fires, the camera flies there, details load ---------
   function openNode(id: string, { fromTrail = false, auto = false } = {}) {
     if (!auto) clearTimeout(birthTimer.current);
+    setMemory(null);
     const b = brain.current;
     if (!b) return;
     b.select(id);
@@ -264,6 +300,7 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
 
   function onQueryChange(value: string) {
     clearTimeout(birthTimer.current);
+    setMemory(null);
     setQuery(value);
     lastSemantic.current = null;
     setMeaningPending(false);
@@ -384,6 +421,40 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
     );
   }
 
+  const onLayoutSaved = useCallback((version: string) => {
+    saveLayoutVersion(version).catch(() => {});
+  }, []);
+
+  // --- "A memory stirs" ---------------------------------------------------------------
+  // Once a day, an older thought you haven't looked at in a while wakes up.
+  const [memory, setMemory] = useState<{ id: string; ago: string } | null>(null);
+  const stirredRef = useRef(false);
+  const onBrainReady = useCallback(() => {
+    measureRef.current();
+    if (stirredRef.current || startCapture) return;
+    stirredRef.current = true;
+    const today = new Date().toDateString();
+    try {
+      if (localStorage.getItem("brain:stirred") === today) return;
+    } catch {
+      return;
+    }
+    // After the brain has settled into view.
+    setTimeout(() => {
+      if (sheetRef.current) return;
+      const pick = pickMemory(brain.current?.getModel() ?? initialModel, Date.now());
+      if (!pick) return;
+      try {
+        localStorage.setItem("brain:stirred", today);
+      } catch {
+        // Storage blocked: it may stir again today.
+      }
+      setMemory(pick);
+      brain.current?.stir(pick.id);
+    }, 3500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onPositionsSettled = useCallback((positions: { id: string; x: number; y: number; z: number }[]) => {
     savePositions(positions).catch((err) => console.error("Saving layout failed", err));
   }, []);
@@ -401,31 +472,47 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
     sheetRef.current = sheet;
   }, [sheet]);
 
-  // Measure what the UI covers (chips on top; bar, results or sheet below) and
-  // centre the brain in the space that's left. Labels avoid covered bands.
+  // Measure what the UI covers (chips on top; bar, results or sheet below; the
+  // side panel on desktop) and centre the brain in the space that's left.
+  // Labels avoid covered areas and framing fits around them.
   const topRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const measure = () => {
-      const h = window.innerHeight;
+      // visualViewport shrinks when the iOS keyboard opens; innerHeight doesn't.
+      const vv = window.visualViewport;
+      const h = vv ? vv.height + vv.offsetTop : window.innerHeight;
+      const w = window.innerWidth;
       const top = topRef.current?.getBoundingClientRect().bottom ?? 110;
-      let bottomEdge = bottomRef.current?.getBoundingClientRect().top ?? h - 80;
-      const aside = asideRef.current?.getBoundingClientRect();
-      // On phones the sheet spans the width; on desktop it's a side panel.
-      if (aside && isMobile && sheet?.kind !== "capture") bottomEdge = Math.min(bottomEdge, aside.top);
-      if (!bottomRef.current && !aside) bottomEdge = h;
-      brain.current?.setOcclusion(top, Math.max(0, h - bottomEdge));
+      let bottomEdge = bottomRef.current ? bottomRef.current.offsetTop : h;
+      let right = 0;
+      const aside = asideRef.current;
+      if (aside) {
+        // offsetTop/Left ignore the slide-in animation's transform.
+        if (isMobile) {
+          if (sheet?.kind !== "capture") bottomEdge = Math.min(bottomEdge, aside.offsetTop);
+        } else {
+          right = w - aside.offsetLeft;
+        }
+      }
+      bottomEdge = Math.min(bottomEdge, h);
+      brain.current?.setOcclusion(top, Math.max(0, h - bottomEdge), right);
       const visibleCentre = (top + bottomEdge) / 2;
-      brain.current?.setViewShift(Math.min(0.35, Math.max(0, (h / 2 - visibleCentre) / h)));
+      brain.current?.setViewShift(right / (2 * w), Math.min(0.35, Math.max(0, (h / 2 - visibleCentre) / h)));
     };
+    measureRef.current = measure;
     measure();
     const observer = new ResizeObserver(measure);
     [topRef.current, bottomRef.current, asideRef.current].forEach((el) => el && observer.observe(el));
     window.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("scroll", measure);
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [isMobile, sheet, results, query, focused, toast]);
 
@@ -439,6 +526,9 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
         <Brain3D
           ref={brain}
           model={initialModel}
+          layoutVersion={layoutVersion}
+          onLayoutSaved={onLayoutSaved}
+          onReady={onBrainReady}
           isMobile={isMobile}
           reducedMotion={reducedMotion}
           onSelect={onSelect}
@@ -553,6 +643,46 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
         <p className="brain-fade-in pointer-events-none absolute inset-x-0 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+4.5rem)] z-10 mx-auto w-fit rounded-full border border-border bg-surface px-4 py-2 text-xs text-muted backdrop-blur">
           {isMobile ? "Drag to spin · pinch to zoom · tap a neuron" : "Drag to spin · scroll to zoom · click a neuron"}
         </p>
+      )}
+
+      {memory && !sheet && nodeById.get(memory.id) && (
+        <div className="brain-fade-in absolute inset-x-3 top-[calc(max(0.75rem,env(safe-area-inset-top))+6.5rem)] z-20 mx-auto max-w-md rounded-2xl border border-border bg-surface p-4 backdrop-blur-xl">
+          <div className="flex items-start gap-3">
+            <span
+              className="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full"
+              style={{ background: nodeById.get(memory.id)!.color, boxShadow: `0 0 12px ${nodeById.get(memory.id)!.color}` }}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] uppercase tracking-wide text-muted">
+                A memory stirs
+                {nodeById.get(memory.id)!.region != null && <> · {model.regions[nodeById.get(memory.id)!.region!]?.name}</>} ·{" "}
+                {memory.ago}
+              </p>
+              <p className="mt-1 leading-snug">{nodeById.get(memory.id)!.caption}</p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => {
+                    const id = memory.id;
+                    setMemory(null);
+                    openNode(id);
+                  }}
+                  className="rounded-full bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent"
+                >
+                  Open
+                </button>
+                <button
+                  onClick={() => {
+                    setMemory(null);
+                    brain.current?.clearActivation();
+                  }}
+                  className="rounded-full px-3 py-1.5 text-xs text-muted"
+                >
+                  Not now
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {toast && (

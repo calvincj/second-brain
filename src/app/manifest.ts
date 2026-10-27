@@ -7,8 +7,9 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Log what you learn. Find it by idea.",
     start_url: "/",
     display: "standalone",
-    background_color: "#0b0b12",
-    theme_color: "#0b0b12",
+    // Same as the brain's background, so launch doesn't flash a second colour.
+    background_color: "#04050c",
+    theme_color: "#04050c",
     icons: [
       { src: "/pwa-icon/192", sizes: "192x192", type: "image/png" },
       { src: "/pwa-icon/512", sizes: "512x512", type: "image/png" },

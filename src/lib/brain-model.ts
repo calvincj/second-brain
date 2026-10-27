@@ -238,6 +238,8 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
       caption: n.caption,
       tags: n.tags,
       embedded: n.embedded,
+      createdAt: n.createdAt,
+      lastViewedAt: n.lastViewedAt,
       x: n.x ?? undefined,
       y: n.y ?? undefined,
       z: n.z ?? undefined,

@@ -27,8 +27,14 @@ function WakingUp() {
 
 async function Brain({ searchParams }: Pick<PageProps<"/">, "searchParams">) {
   const supabase = await createClient();
-  const [{ data }, { nodes, edges }, params] = await Promise.all([supabase.auth.getUser(), getMapData(), searchParams]);
+  const [{ data }, { nodes, edges, layoutVersion }, params] = await Promise.all([
+    supabase.auth.getUser(),
+    getMapData(),
+    searchParams,
+  ]);
   // "/?capture=1" (e.g. from an iPhone Shortcut) opens straight into logging.
   const capture = params.capture === "1";
-  return <BrainExperience userId={data.user!.id} nodes={nodes} edges={edges} startCapture={capture} />;
+  return (
+    <BrainExperience userId={data.user!.id} nodes={nodes} edges={edges} layoutVersion={layoutVersion} startCapture={capture} />
+  );
 }

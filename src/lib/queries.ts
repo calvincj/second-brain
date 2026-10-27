@@ -80,18 +80,34 @@ export async function getRelatedLogs(id: string): Promise<LogWithImage[]> {
 
 // Everything the brain map needs: nodes with saved positions, plus the
 // directed neighbour lists. No vectors leave the database.
-export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[] }> {
+type MapLogRow = {
+  id: string;
+  caption: string;
+  tags: string[];
+  x: number | null;
+  y: number | null;
+  z: number | null;
+  embedding_model: string | null;
+  created_at: string;
+  last_viewed_at?: string | null;
+};
+
+// Reads logs for the map, tolerating migration 0007 (last_viewed_at) not
+// having been run yet.
+async function fetchMapLogs(supabase: Supabase): Promise<MapLogRow[]> {
+  const page = (cols: string) => (from: number, to: number) =>
+    supabase.from("logs").select(cols).order("created_at").order("id").range(from, to);
+  try {
+    return await fetchAll<MapLogRow>(page("id, caption, tags, x, y, z, embedding_model, created_at, last_viewed_at") as never);
+  } catch {
+    return fetchAll<MapLogRow>(page("id, caption, tags, x, y, z, embedding_model, created_at") as never);
+  }
+}
+
+export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]; layoutVersion: string | null }> {
   const supabase = await createClient();
-  const [logs, neighbors] = await Promise.all([
-    fetchAll<{ id: string; caption: string; tags: string[]; x: number | null; y: number | null; z: number | null; embedding_model: string | null }>(
-      (from, to) =>
-        supabase
-          .from("logs")
-          .select("id, caption, tags, x, y, z, embedding_model")
-          .order("created_at")
-          .order("id")
-          .range(from, to),
-    ),
+  const [logs, neighbors, settings] = await Promise.all([
+    fetchMapLogs(supabase),
     fetchAll<{ log_id: string; neighbor_id: string; similarity: number }>((from, to) =>
       supabase
         .from("log_neighbors")
@@ -100,10 +116,23 @@ export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]
         .order("neighbor_id")
         .range(from, to),
     ),
+    // Missing table (migration 0007 not run) just means "unknown".
+    supabase.from("brain_settings").select("layout_version").maybeSingle(),
   ]);
   return {
-    nodes: logs.map(({ embedding_model, ...l }) => ({ ...l, embedded: !!embedding_model })),
+    nodes: logs.map((l) => ({
+      id: l.id,
+      caption: l.caption,
+      tags: l.tags,
+      x: l.x,
+      y: l.y,
+      z: l.z,
+      embedded: !!l.embedding_model,
+      createdAt: l.created_at,
+      lastViewedAt: l.last_viewed_at ?? null,
+    })),
     edges: neighbors.map((n) => ({ source: n.log_id, target: n.neighbor_id, similarity: n.similarity })),
+    layoutVersion: settings.error ? null : (settings.data?.layout_version ?? ""),
   };
 }
 

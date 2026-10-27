@@ -238,6 +238,8 @@ try {
     await page.waitForTimeout(500);
   }
   check("3D layout saved positions", placed.length === COUNT, `${placed.length}/${COUNT}`);
+  const settings = await (await admin("/rest/v1/brain_settings?select=layout_version")).json();
+  check("layout version saved for all devices", settings[0]?.layout_version?.length > 0, JSON.stringify(settings));
   await page.waitForTimeout(1500);
   await page.screenshot({ path: OUT + "01-brain.png" });
 
@@ -350,6 +352,23 @@ try {
   await page.waitForTimeout(2500);
   const pos2 = await (await admin("/rest/v1/logs?select=id,x,y,z&order=id")).json();
   check("reopening the brain keeps the layout stable", JSON.stringify(pos1) === JSON.stringify(pos2));
+
+  // A memory stirs: make a few thoughts old and unseen, allow today's stir.
+  const old = new Date(Date.now() - 30 * 864e5).toISOString();
+  await admin(`/rest/v1/logs?id=not.is.null`, { method: "PATCH", body: JSON.stringify({ created_at: old, last_viewed_at: null }) });
+  await page.evaluate(() => localStorage.removeItem("brain:stirred"));
+  await page.goto(APP + "/");
+  const stirred = await page.waitForSelector("text=A memory stirs", { timeout: 25000 }).catch(() => null);
+  check("a memory stirs for old, unseen thoughts", !!stirred);
+  if (stirred) {
+    await page.screenshot({ path: OUT + "06-memory.png" });
+    await page.locator('button:has-text("Open")').first().click();
+    check("opening the memory shows its card", !!(await page.waitForSelector("aside >> text=Connected thoughts", { timeout: 8000 }).catch(() => null)));
+    await page.locator('aside button[aria-label="Close"]').click();
+  }
+  await page.goto(APP + "/");
+  await page.waitForTimeout(5000);
+  check("only one stir per day", (await page.locator("text=A memory stirs").count()) === 0);
 
   await page.goto(APP + "/?capture=1");
   await page.waitForSelector("text=New thought", { timeout: 20000 });

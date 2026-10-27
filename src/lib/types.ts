@@ -24,6 +24,8 @@ export type MapNode = {
   y: number | null;
   z: number | null;
   embedded: boolean;
+  createdAt?: string;
+  lastViewedAt?: string | null;
 };
 
 export type MapEdge = { source: string; target: string; similarity: number };
