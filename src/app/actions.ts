@@ -240,14 +240,32 @@ export async function addTags(id: string, tags: string[]): Promise<string[] | nu
 
 export async function getLogDetail(id: string): Promise<LogWithImage | null> {
   const { supabase } = await requireUser();
-  // Remember when it was last looked at (for "a memory stirs"); ignored if
-  // migration 0007 hasn't been run.
-  await supabase.from("logs").update({ last_viewed_at: new Date().toISOString() }).eq("id", id);
+  // Remember when it was last looked at (for "a memory stirs"), after
+  // responding so a tap never waits on it; ignored if migration 0007 hasn't run.
+  after(async () => {
+    await supabase.from("logs").update({ last_viewed_at: new Date().toISOString() }).eq("id", id);
+  });
   return getLog(id);
+}
+
+// A new personal token for the iOS Shortcut / Share Sheet capture API.
+// Returned once; only its hash is stored. Creating one revokes the old one.
+export async function createCaptureToken(): Promise<string | null> {
+  const { supabase, user } = await requireUser();
+  const { randomBytes, createHash } = await import("node:crypto");
+  const token = randomBytes(32).toString("base64url");
+  const hash = createHash("sha256").update(token).digest("hex");
+  const { error } = await supabase
+    .from("brain_settings")
+    .upsert({ user_id: user.id, capture_token_hash: hash, updated_at: new Date().toISOString() });
+  return error ? null : token;
 }
 
 // Which layout rules the saved positions follow, shared by every device.
 export async function saveLayoutVersion(version: string) {
   const { supabase, user } = await requireUser();
-  await supabase.from("brain_settings").upsert({ user_id: user.id, layout_version: version, updated_at: new Date().toISOString() });
+  const { error } = await supabase
+    .from("brain_settings")
+    .upsert({ user_id: user.id, layout_version: version, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
 }

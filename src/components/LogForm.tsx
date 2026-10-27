@@ -13,8 +13,9 @@ type Props = {
   // Present when editing an existing log.
   logId?: string;
   initial?: { caption: string; tags: string[]; sourceUrl: string; imagePath: string | null; imageUrl: string | null };
-  // New logs only: start with this caption instead of any saved draft.
+  // New logs only: start with this caption / link instead of any saved draft.
   prefill?: string;
+  prefillUrl?: string;
   autoFocus?: boolean;
   onDone?: () => void;
   onSaved?: (result: Extract<ActionResult, { ok: true }>) => void;
@@ -28,7 +29,7 @@ function readDraft(): Partial<LogInput> {
   }
 }
 
-export function LogForm({ userId, logId, initial, prefill, autoFocus, onDone, onSaved }: Props) {
+export function LogForm({ userId, logId, initial, prefill, prefillUrl, autoFocus, onDone, onSaved }: Props) {
   const isEdit = !!logId;
   const [caption, setCaption] = useState(initial?.caption ?? "");
   const [tags, setTags] = useState(initial?.tags.join(", ") ?? "");
@@ -51,10 +52,11 @@ export function LogForm({ userId, logId, initial, prefill, autoFocus, onDone, on
     if (prefill) setCaption(prefill);
     else if (draft.caption) setCaption(draft.caption);
     if (draft.tags) setTags(draft.tags);
-    if (draft.sourceUrl) setSourceUrl(draft.sourceUrl);
-    if (draft.tags || draft.sourceUrl) setShowExtras(true);
+    if (prefillUrl) setSourceUrl(prefillUrl);
+    else if (draft.sourceUrl) setSourceUrl(draft.sourceUrl);
+    if (draft.tags || draft.sourceUrl || prefillUrl) setShowExtras(true);
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [isEdit, prefill]);
+  }, [isEdit, prefill, prefillUrl]);
 
   // Autosave the draft so a flaky connection never loses typing.
   useEffect(() => {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import {
   addTags,
+  createCaptureToken,
   deleteLogInPlace,
   getLogDetail,
   restoreLog,
@@ -38,7 +39,12 @@ function BrainLoading() {
   );
 }
 
-type Sheet = { kind: "node"; id: string } | { kind: "region"; id: number } | { kind: "capture"; prefill: string } | null;
+type Sheet =
+  | { kind: "node"; id: string }
+  | { kind: "region"; id: number }
+  | { kind: "capture"; prefill: string }
+  | { kind: "shortcut" }
+  | null;
 
 type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[]; layoutVersion: string | null; startCapture?: boolean };
 
@@ -119,6 +125,8 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   const sheetRef = useRef<Sheet>(null);
   const birthTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const measureRef = useRef<() => void>(() => {});
+  const actedSinceSettle = useRef(false);
+  const busyRef = useRef(false);
   const pendingTags = useRef<{ id: string; tags: string[]; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // Server renders without the hint; the browser checks if it was dismissed.
   const hintStored = useSyncExternalStore(
@@ -327,6 +335,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   // --- Regions -------------------------------------------------------------------------
   function openRegion(id: number) {
     clearTimeout(birthTimer.current);
+    setMemory(null);
     const region = model.regions[id];
     if (!region) return;
     brain.current?.select(null);
@@ -337,6 +346,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
 
   // --- A new thought is born -------------------------------------------------------------
   function onSaved(result: Extract<ActionResult, { ok: true }>) {
+    setMemory(null);
     setSheet(null);
     clearSearch();
     const linkedIds = brain.current?.addThought(result.node, result.neighbors) ?? [];
@@ -421,42 +431,39 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
     );
   }
 
-  const onLayoutSaved = useCallback((version: string) => {
-    saveLayoutVersion(version).catch(() => {});
-  }, []);
-
   // --- "A memory stirs" ---------------------------------------------------------------
   // Once a day, an older thought you haven't looked at in a while wakes up.
   const [memory, setMemory] = useState<{ id: string; ago: string } | null>(null);
   const stirredRef = useRef(false);
-  const onBrainReady = useCallback(() => {
-    measureRef.current();
+  // After the brain has settled into view, and only if you aren't already
+  // doing something (searching, reading, logging, touching the brain).
+  const onBrainSettled = useCallback(() => {
     if (stirredRef.current || startCapture) return;
     stirredRef.current = true;
-    const today = new Date().toDateString();
-    try {
-      if (localStorage.getItem("brain:stirred") === today) return;
-    } catch {
-      return;
-    }
-    // After the brain has settled into view.
+    actedSinceSettle.current = false;
     setTimeout(() => {
-      if (sheetRef.current) return;
-      const pick = pickMemory(brain.current?.getModel() ?? initialModel, Date.now());
-      if (!pick) return;
+      if (sheetRef.current || busyRef.current || actedSinceSettle.current) return;
+      const today = new Date().toDateString();
       try {
+        if (localStorage.getItem("brain:stirred") === today) return;
         localStorage.setItem("brain:stirred", today);
       } catch {
-        // Storage blocked: it may stir again today.
+        return;
       }
+      const pick = pickMemory(brain.current?.getModel() ?? initialModel, Date.now());
+      if (!pick) return;
       setMemory(pick);
       brain.current?.stir(pick.id);
-    }, 3500);
+    }, 1200);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onPositionsSettled = useCallback((positions: { id: string; x: number; y: number; z: number }[]) => {
-    savePositions(positions).catch((err) => console.error("Saving layout failed", err));
+  // Positions first; the layout version is recorded only once they're saved,
+  // so a failed save means the brain simply re-settles next time.
+  const onPositionsSettled = useCallback((version: string | null, positions: { id: string; x: number; y: number; z: number }[]) => {
+    savePositions(positions)
+      .then(() => (version ? saveLayoutVersion(version) : undefined))
+      .catch((err) => console.error("Saving layout failed", err));
   }, []);
 
   const onBackground = useCallback(() => {
@@ -470,7 +477,9 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
 
   useEffect(() => {
     sheetRef.current = sheet;
-  }, [sheet]);
+    // Searching or reading a toast counts as busy for "a memory stirs".
+    busyRef.current = !!query.trim() || !!toast;
+  }, [sheet, query, toast]);
 
   // Measure what the UI covers (chips on top; bar, results or sheet below; the
   // side panel on desktop) and centre the brain in the space that's left.
@@ -499,7 +508,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
       bottomEdge = Math.min(bottomEdge, h);
       brain.current?.setOcclusion(top, Math.max(0, h - bottomEdge), right);
       const visibleCentre = (top + bottomEdge) / 2;
-      brain.current?.setViewShift(right / (2 * w), Math.min(0.35, Math.max(0, (h / 2 - visibleCentre) / h)));
+      brain.current?.setViewShift(right / (2 * w), Math.min(0.35, Math.max(-0.35, (h / 2 - visibleCentre) / h)));
     };
     measureRef.current = measure;
     measure();
@@ -521,14 +530,21 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   const region = sheet?.kind === "region" ? model.regions[sheet.id] : undefined;
 
   return (
-    <div className="brain-scope fixed inset-0 overflow-hidden" onPointerDown={dismissHint}>
+    <div
+      className="brain-scope fixed inset-0 overflow-hidden"
+      onPointerDown={() => {
+        actedSinceSettle.current = true;
+        dismissHint();
+      }}
+      onKeyDown={() => (actedSinceSettle.current = true)}
+    >
       {thoughtCount > 0 && (
         <Brain3D
           ref={brain}
           model={initialModel}
           layoutVersion={layoutVersion}
-          onLayoutSaved={onLayoutSaved}
-          onReady={onBrainReady}
+          onReady={() => measureRef.current()}
+          onSettled={onBrainSettled}
           isMobile={isMobile}
           reducedMotion={reducedMotion}
           onSelect={onSelect}
@@ -603,6 +619,18 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
                 <Link href="/list" className="block px-4 py-3 hover:bg-surface-2">
                   List view
                 </Link>
+                <Link href="/capture" className="block px-4 py-3 hover:bg-surface-2">
+                  Quick capture page
+                </Link>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setSheet({ kind: "shortcut" });
+                  }}
+                  className="block w-full px-4 py-3 text-left hover:bg-surface-2"
+                >
+                  iPhone Shortcut…
+                </button>
                 <a href="/api/export" className="block px-4 py-3 hover:bg-surface-2">
                   Export backup
                 </a>
@@ -632,6 +660,69 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
           </nav>
         )}
 
+        {toast && (
+          <div
+            role="status"
+            className="brain-fade-in pointer-events-auto mx-auto max-w-md rounded-2xl border border-accent/40 bg-surface px-4 py-3 text-sm backdrop-blur"
+          >
+            ✦ {toast.text}
+            {toast.action && (
+              <button onClick={toast.action.run} className="ml-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-medium text-accent">
+                {toast.action.label}
+              </button>
+            )}
+            {toast.suggestions && toast.suggestions.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted">Add a tag?</span>
+                {toast.suggestions.map((t) => (
+                  <button key={t} onClick={() => acceptTag(t)} className="rounded-full bg-accent-soft px-2.5 py-1 text-xs text-accent">
+                    + {t}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {memory && !sheet && nodeById.get(memory.id) && (
+          <div className="brain-fade-in pointer-events-auto mx-auto max-w-md rounded-2xl border border-border bg-surface p-4 backdrop-blur-xl">
+            <div className="flex items-start gap-3">
+              <span
+                className="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full"
+                style={{ background: nodeById.get(memory.id)!.color, boxShadow: `0 0 12px ${nodeById.get(memory.id)!.color}` }}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-wide text-muted">
+                  A memory stirs
+                  {nodeById.get(memory.id)!.region != null && <> · {model.regions[nodeById.get(memory.id)!.region!]?.name}</>} ·{" "}
+                  {memory.ago}
+                </p>
+                <p className="mt-1 leading-snug">{nodeById.get(memory.id)!.caption}</p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    onClick={() => {
+                      const id = memory.id;
+                      setMemory(null);
+                      brain.current?.clearActivation();
+                      openNode(id);
+                    }}
+                    className="rounded-full bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent"
+                  >
+                    Open
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMemory(null);
+                      brain.current?.clearActivation();
+                    }}
+                    className="rounded-full px-3 py-1.5 text-xs text-muted"
+                  >
+                    Not now
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {thoughtCount > 0 && thoughtCount < 8 && !sheet && !toast && (
           <p className="pointer-events-auto mx-auto w-fit rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted backdrop-blur">
             Log a few more thoughts and regions will start to form.
@@ -645,69 +736,6 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
         </p>
       )}
 
-      {memory && !sheet && nodeById.get(memory.id) && (
-        <div className="brain-fade-in absolute inset-x-3 top-[calc(max(0.75rem,env(safe-area-inset-top))+6.5rem)] z-20 mx-auto max-w-md rounded-2xl border border-border bg-surface p-4 backdrop-blur-xl">
-          <div className="flex items-start gap-3">
-            <span
-              className="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full"
-              style={{ background: nodeById.get(memory.id)!.color, boxShadow: `0 0 12px ${nodeById.get(memory.id)!.color}` }}
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-[11px] uppercase tracking-wide text-muted">
-                A memory stirs
-                {nodeById.get(memory.id)!.region != null && <> · {model.regions[nodeById.get(memory.id)!.region!]?.name}</>} ·{" "}
-                {memory.ago}
-              </p>
-              <p className="mt-1 leading-snug">{nodeById.get(memory.id)!.caption}</p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={() => {
-                    const id = memory.id;
-                    setMemory(null);
-                    openNode(id);
-                  }}
-                  className="rounded-full bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent"
-                >
-                  Open
-                </button>
-                <button
-                  onClick={() => {
-                    setMemory(null);
-                    brain.current?.clearActivation();
-                  }}
-                  className="rounded-full px-3 py-1.5 text-xs text-muted"
-                >
-                  Not now
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {toast && (
-        <div
-          role="status"
-          className="brain-fade-in absolute inset-x-3 top-[calc(max(0.75rem,env(safe-area-inset-top))+6.5rem)] z-20 mx-auto max-w-md rounded-2xl border border-accent/40 bg-surface px-4 py-3 text-sm backdrop-blur"
-        >
-          ✦ {toast.text}
-          {toast.action && (
-            <button onClick={toast.action.run} className="ml-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-medium text-accent">
-              {toast.action.label}
-            </button>
-          )}
-          {toast.suggestions && toast.suggestions.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-muted">Add a tag?</span>
-              {toast.suggestions.map((t) => (
-                <button key={t} onClick={() => acceptTag(t)} className="rounded-full bg-accent-soft px-2.5 py-1 text-xs text-accent">
-                  + {t}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Bottom: search / add */}
       {!(isMobile && sheet) && (
@@ -768,7 +796,10 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
             </div>
             <button
               type="button"
-              onClick={() => setSheet({ kind: "capture", prefill: query.trim() })}
+              onClick={() => {
+                setMemory(null);
+                setSheet({ kind: "capture", prefill: query.trim() });
+              }}
               aria-label="Log a new thought"
               className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-accent text-2xl font-light text-on-accent shadow-[0_0_24px_rgba(94,230,208,0.55)]"
             >
@@ -788,6 +819,8 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
           <div className="mb-2 flex items-center justify-between">
             <span className="mx-auto h-1 w-10 rounded-full bg-border md:hidden" />
           </div>
+
+          {sheet.kind === "shortcut" && <ShortcutSetup onClose={() => setSheet(null)} />}
 
           {sheet.kind === "capture" && (
             <div>
@@ -975,6 +1008,76 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
           )}
         </aside>
       )}
+    </div>
+  );
+}
+
+// Set up "Log a thought" from an iPhone Shortcut / the Share Sheet / Siri.
+function ShortcutSetup({ onClose }: { onClose: () => void }) {
+  const [token, setToken] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [pending, startTransition] = useTransition();
+  const endpoint = typeof window !== "undefined" ? `${window.location.origin}/api/capture` : "/api/capture";
+
+  return (
+    <div className="text-sm">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="font-semibold">Log from anywhere on your iPhone</h2>
+        <button onClick={onClose} aria-label="Close" className="-mr-2 h-11 w-11 text-xl text-muted">
+          ×
+        </button>
+      </div>
+      <p className="text-muted">
+        A Shortcut can send a thought straight to your brain, from the Share Sheet, the Action button or Siri, without opening the app.
+      </p>
+      {!token ? (
+        <button
+          disabled={pending}
+          onClick={() =>
+            startTransition(async () => {
+              const t = await createCaptureToken();
+              if (t) setToken(t);
+              else setError(true);
+            })
+          }
+          className="mt-4 h-11 rounded-full bg-accent px-5 font-medium text-on-accent disabled:opacity-60"
+        >
+          {pending ? "Creating…" : "Create my personal token"}
+        </button>
+      ) : (
+        <div className="mt-4 space-y-3">
+          <p className="text-xs text-muted">Shown once. Creating a new one turns this one off.</p>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs">{token}</code>
+            <button
+              onClick={() => {
+                navigator.clipboard?.writeText(token).then(() => setCopied(true));
+              }}
+              className="h-9 shrink-0 rounded-full bg-accent-soft px-3 text-xs text-accent"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <ol className="list-decimal space-y-1.5 pl-5 text-muted">
+            <li>Shortcuts app → + → add <b className="text-text">Get Contents of URL</b>.</li>
+            <li>
+              URL: <code className="text-text">{endpoint}</code>, Method <b className="text-text">POST</b>.
+            </li>
+            <li>
+              Header <b className="text-text">Authorization</b> = <code className="text-text">Bearer &lt;token&gt;</code>.
+            </li>
+            <li>
+              Request Body <b className="text-text">JSON</b>: key <code className="text-text">text</code> = Shortcut Input (or Ask for Input).
+              Optional: <code className="text-text">tags</code>, <code className="text-text">url</code>.
+            </li>
+            <li>
+              In the Shortcut&rsquo;s settings, turn on <b className="text-text">Show in Share Sheet</b>.
+            </li>
+          </ol>
+        </div>
+      )}
+      {error && <p className="mt-3 text-danger">Couldn&rsquo;t create a token. Has migration 0008 been run?</p>}
     </div>
   );
 }

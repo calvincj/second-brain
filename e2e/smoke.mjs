@@ -375,6 +375,36 @@ try {
   check("/?capture=1 opens straight into logging", true);
   await page.locator('aside button[aria-label="Close"]').click();
 
+  // --- fast capture ------------------------------------------------------------------------------
+  await page.goto(APP + "/capture?text=" + encodeURIComponent("Shared from Safari: honey never spoils") + "&url=" + encodeURIComponent("https://example.com"));
+  await page.waitForSelector('textarea[placeholder="What did you learn?"]', { timeout: 30000 });
+  await page.waitForTimeout(500);
+  check("/capture prefills text and link", (await page.inputValue("textarea")) === "Shared from Safari: honey never spoils" && (await page.inputValue('input[placeholder^="Source link"]')).includes("example.com"));
+  await page.click('button:has-text("Log it")');
+  check("/capture saves and confirms", !!(await page.waitForSelector("text=✦ Saved.", { timeout: 15000 }).catch(() => null)));
+
+  await page.goto(APP + "/");
+  await page.waitForSelector("canvas", { timeout: 20000 });
+  await page.click('button[aria-label="Menu"]');
+  await page.click("text=iPhone Shortcut…");
+  await page.click("text=Create my personal token");
+  const tokenEl = await page.waitForSelector("aside code", { timeout: 10000 }).catch(() => null);
+  const token = tokenEl ? (await tokenEl.innerText()).trim() : "";
+  check("Shortcut sheet creates a token", token.length >= 32);
+  await page.locator('aside button[aria-label="Close"]').click();
+  const bad = await fetch(APP + "/api/capture", { method: "POST", headers: { Authorization: "Bearer " + "x".repeat(40), "Content-Type": "application/json" }, body: JSON.stringify({ text: "nope" }) });
+  check("capture API rejects a bad token", bad.status === 401);
+  const good = await fetch(APP + "/api/capture", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "Logged by Siri: octopus arms can taste", tags: "biology" }),
+  });
+  const goodJson = await good.json();
+  check("capture API logs a thought with a token", good.ok && goodJson.ok, JSON.stringify(goodJson));
+  await page.waitForTimeout(2500);
+  const viaApi = await (await admin(`/rest/v1/logs?select=embedding_model,tags&id=eq.${goodJson.id}`)).json();
+  check("API-captured thought gets connected", !!viaApi[0]?.embedding_model && viaApi[0]?.tags.includes("biology"), JSON.stringify(viaApi));
+
   // --- menu + sign out ------------------------------------------------------------------------
   await page.click('button[aria-label="Menu"]');
   check("menu links to list view", await page.locator('a[href="/list"]').isVisible());

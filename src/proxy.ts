@@ -1,7 +1,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/api/cron"];
+// /api/capture authenticates with its own token (iOS Shortcuts have no session).
+const PUBLIC_PATHS = ["/login", "/api/cron", "/api/capture"];
 
 // Refreshes the Supabase session on every request and gates the app behind login.
 export async function proxy(request: NextRequest) {

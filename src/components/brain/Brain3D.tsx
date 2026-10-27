@@ -49,13 +49,15 @@ type Props = {
   model: BrainModel;
   // Layout rules the saved positions were made with (null = unknown).
   layoutVersion: string | null;
-  onLayoutSaved: (version: string) => void;
   onReady?: () => void;
+  // The first layout has settled (or there was nothing to settle).
+  onSettled?: () => void;
   isMobile: boolean;
   reducedMotion: boolean;
   onSelect: (id: string) => void;
   onBackground: () => void;
-  onPositionsSettled: (positions: { id: string; x: number; y: number; z: number }[]) => void;
+  // version: set when these positions follow new layout rules (save it after).
+  onPositionsSettled: (version: string | null, positions: { id: string; x: number; y: number; z: number }[]) => void;
   ref?: Ref<BrainHandle>;
 };
 
@@ -112,8 +114,8 @@ function pos(n: BrainNode) {
 export default function Brain3D({
   model,
   layoutVersion,
-  onLayoutSaved,
   onReady,
+  onSettled,
   isMobile,
   reducedMotion,
   onSelect,
@@ -141,8 +143,9 @@ export default function Brain3D({
   mobileRef.current = isMobile;
   // The most recent framing request, re-run when the UI's covered area changes.
   const lastFrame = useRef<{ ids: string[] | null; at: number }>({ ids: null, at: 0 });
-  const callbacks = useRef({ onSelect, onBackground, onPositionsSettled, onLayoutSaved, onReady });
-  callbacks.current = { onSelect, onBackground, onPositionsSettled, onLayoutSaved, onReady };
+  const callbacks = useRef({ onSelect, onBackground, onPositionsSettled, onReady, onSettled });
+  callbacks.current = { onSelect, onBackground, onPositionsSettled, onReady, onSettled };
+  const settledOnce = useRef(false);
   const modelRef = useRef(model);
   const nodeIndex = useRef(new Map<string, BrainNode>());
   const viewShift = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
@@ -184,13 +187,16 @@ export default function Brain3D({
           if (!n.embedded) return;
           n.fx = n.fy = n.fz = undefined;
         });
+        if (!settledOnce.current) {
+          settledOnce.current = true;
+          callbacks.current.onSettled?.();
+        }
         if (!settle.pending) return;
         settle.pending = false;
-        if (needsVersionSave.current) {
-          needsVersionSave.current = false;
-          callbacks.current.onLayoutSaved(LAYOUT_VERSION);
-        }
-        callbacks.current.onPositionsSettled(
+        // The version is recorded only once the positions it describes are saved.
+        const version = needsVersionSave.current ? LAYOUT_VERSION : null;
+        needsVersionSave.current = false;
+        callbacks.current.onPositionsSettled(version, 
           nodes
             .filter((n) => n.embedded)
             .map((n) => ({
@@ -303,7 +309,12 @@ export default function Brain3D({
     };
     wakeRef.current = wakeUp;
     lastInteraction.current = performance.now();
-    el.addEventListener("pointerdown", wakeUp);
+    // Touching the brain means the user is in charge: no automatic re-framing.
+    const onTouch = () => {
+      fitOnStop.current = false;
+      wakeUp();
+    };
+    el.addEventListener("pointerdown", onTouch);
     el.addEventListener("wheel", wakeUp, { passive: true });
     const tick = (t: number) => {
       frame = requestAnimationFrame(tick);
@@ -347,6 +358,9 @@ export default function Brain3D({
           v.label.visible = showLabel;
           if (showLabel) {
             screenScale(v.label, v.labelBase, isMobile ? 17 : 19);
+            // Hits read strongest; thoughts reached by the spread are dimmer.
+            const strong = id === selected.current || id === hovered.current || v.target >= 0.5;
+            (v.label.material as THREE.SpriteMaterial).opacity = strong ? 1 : 0.6;
             v.label.position.set(0, -(v.baseScale * 0.55 + 3), 0);
             // Rank by the target (not the easing value) and favour labels
             // already showing, so near-equal labels don't swap and flicker.
@@ -443,7 +457,7 @@ export default function Brain3D({
         const sp = graph.graph2ScreenCoords(r.label.position.x, r.label.position.y, r.label.position.z);
         const rw = (r.labelBase[0] / r.labelBase[1]) * (isMobile ? 13 : 15);
         const rr = { x0: sp.x - rw / 2, y0: sp.y - 8, x1: sp.x + rw / 2, y1: sp.y + 8 };
-        const blocked = placed.some((o) => rr.x0 < o.x1 && rr.x1 > o.x0 && rr.y0 < o.y1 && rr.y1 > o.y0);
+        const blocked = rr.x0 < 4 || rr.x1 > W - 4 || placed.some((o) => rr.x0 < o.x1 && rr.x1 > o.x0 && rr.y0 < o.y1 && rr.y1 > o.y0);
         if (blocked || (anyActive && !regionActive)) r.label.visible = false;
         else placed.push(rr);
         (r.label.material as THREE.SpriteMaterial).opacity = anyActive && !regionActive ? 0.25 : 0.9;
@@ -455,7 +469,7 @@ export default function Brain3D({
     return () => {
       cancelAnimationFrame(frame);
       clearTimeout(idleTimer);
-      el.removeEventListener("pointerdown", wakeUp);
+      el.removeEventListener("pointerdown", onTouch);
       el.removeEventListener("wheel", wakeUp);
       document.removeEventListener("visibilitychange", onVisible);
       resize.disconnect();
@@ -582,7 +596,9 @@ export default function Brain3D({
     label.padding = 1.5;
     label.borderRadius = 2;
     label.position.set(0, -(v.baseScale * 0.45 + 3), 0);
+    // Text always draws over neuron cores.
     (label.material as THREE.SpriteMaterial).depthWrite = false;
+    (label.material as THREE.SpriteMaterial).depthTest = false;
     label.renderOrder = 10;
     v.group.add(label);
     v.label = label;
@@ -774,27 +790,39 @@ export default function Brain3D({
   // fits their bounding sphere against the narrower of the vertical and
   // horizontal fields of view (zoomToFit used only the box, so portrait
   // phones clipped regions as the brain rotated). One thought: fly to it.
-  function frameThoughts(ids: string[] | null, ms: number) {
+  function frameThoughts(ids: string[] | null, ms: number, rerun = false) {
     const graph = graphRef.current;
     if (!graph) return;
-    lastFrame.current = { ids, at: performance.now() };
+    // A re-run (after the UI's covered area changed) must not extend its own window.
+    if (!rerun) lastFrame.current = { ids, at: performance.now() };
     let nodes = (ids ? ids.map(nodeById) : modelRef.current.nodes).filter((n): n is BrainNode => !!n && n.x != null);
     // "Everything" means connected thoughts: the unprocessed ones on the outer
     // shell would zoom the whole brain out.
     if (!ids && nodes.some((n) => n.embedded)) nodes = nodes.filter((n) => n.embedded);
     if (nodes.length === 0) return;
-    const c = nodes.reduce((acc, n) => acc.add(pos(n)), new THREE.Vector3()).divideScalar(nodes.length);
-    const r = Math.max(30, ...nodes.map((n) => pos(n).distanceTo(c))) + 20;
+    // Centre on the bounding box (not the centroid, which an outlying region
+    // drags off-centre). The brain auto-rotates about its vertical axis, so
+    // fit height to the vertical extent and width to the widest radius in the
+    // horizontal plane.
+    const box = new THREE.Box3().setFromPoints(nodes.map(pos));
+    const c = box.getCenter(new THREE.Vector3());
+    const halfY = Math.max(15, (box.max.y - box.min.y) / 2) + 8;
+    const radXZ = Math.max(15, ...nodes.map((n) => Math.hypot((n.x ?? 0) - c.x, (n.z ?? 0) - c.z))) + 8;
     const camera = graph.camera() as THREE.PerspectiveCamera;
     // Fit into the part of the screen the UI leaves visible.
     const W = graph.width();
     const H = graph.height();
     const occ = occlusion.current;
-    const visH = Math.max(H * 0.3, H - occ.top - occ.bottom);
+    const visH = Math.max(H * 0.15, H - occ.top - occ.bottom);
     const visW = Math.max(W * 0.3, W - occ.right);
     const vFov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * (visH / H));
     const hFov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * (visW / H));
-    const distance = Math.max(mobileRef.current ? 130 : 100, r / Math.sin(Math.min(vFov, hFov) / 2));
+    // Depth adds to the distance: the nearest points must not poke past the frame.
+    const distance = Math.max(
+      mobileRef.current ? 110 : 90,
+      halfY / Math.tan(vFov / 2) + radXZ,
+      radXZ / Math.tan(hFov / 2) + radXZ,
+    );
     const dir = camera.position.clone().sub(c).normalize();
     if (!Number.isFinite(dir.x) || dir.lengthSq() === 0) dir.set(0, 0, 1);
     const to = c.clone().add(dir.multiplyScalar(distance));
@@ -931,6 +959,8 @@ export default function Brain3D({
     },
     flyToNode(id) {
       wakeRef.current();
+      fitOnStop.current = false;
+      lastFrame.current.at = 0; // a flight, not a framing: never re-frame over it
       const graph = graphRef.current;
       const n = nodeById(id);
       if (!graph || !n) return;
@@ -950,6 +980,7 @@ export default function Brain3D({
     // Frame everything that lit up, so you see the signal spread.
     focusActivation() {
       wakeRef.current();
+      fitOnStop.current = false;
       const graph = graphRef.current;
       const lit = activation.current;
       if (!graph || !lit.size) return;
@@ -961,6 +992,7 @@ export default function Brain3D({
     },
     flyToRegion(regionId) {
       wakeRef.current();
+      fitOnStop.current = false;
       const graph = graphRef.current;
       const region = modelRef.current.regions[regionId];
       if (!graph || !region) return;
@@ -981,6 +1013,8 @@ export default function Brain3D({
     },
     stir(id) {
       wakeRef.current();
+      fitOnStop.current = false;
+      lastFrame.current.at = 0; // a flight, not a framing: never re-frame over it
       const graph = graphRef.current;
       const n = nodeById(id);
       const v = visuals.current.get(id);
@@ -1008,7 +1042,7 @@ export default function Brain3D({
       // A sheet that just opened changes the free space: re-frame the latest
       // request (e.g. the region you just tapped) to fit what's left.
       const changed = Math.abs(prev.top - top) + Math.abs(prev.bottom - bottom) + Math.abs(prev.right - right) > 24;
-      if (changed && performance.now() - lastFrame.current.at < 1500) frameThoughts(lastFrame.current.ids, 600);
+      if (changed && performance.now() - lastFrame.current.at < 1500) frameThoughts(lastFrame.current.ids, 600, true);
     },
     setViewShift(x, y) {
       wakeRef.current();
