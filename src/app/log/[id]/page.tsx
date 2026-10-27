@@ -55,7 +55,8 @@ async function LogDetail({ params }: Pick<PageProps<"/log/[id]">, "params">) {
             rel="noopener noreferrer"
             className="mt-3 inline-block text-sm text-accent underline-offset-2 hover:underline"
           >
-            ↗ {domainOf(log.source_url)}
+            ↗ {log.source_title ? `${log.source_title} · ` : ""}
+            {domainOf(log.source_url)}
           </a>
         )}
         {log.imageUrl && (
@@ -90,5 +91,5 @@ async function Related({ id }: { id: string }) {
   if (related.length === 0) {
     return <p className="px-1 text-sm text-muted">Nothing related yet. Keep logging.</p>;
   }
-  return related.map((r) => <LogCard key={r.id} log={r} showSimilarity />);
+  return related.map((r) => <LogCard key={r.id} log={r} />);
 }

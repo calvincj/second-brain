@@ -3,9 +3,11 @@ import { Suspense } from "react";
 import { signOut } from "@/app/actions";
 import { LogCard } from "@/components/LogCard";
 import { LogForm } from "@/components/LogForm";
+import { Rediscover } from "@/components/Rediscover";
 import { SearchBar } from "@/components/SearchBar";
 import { FormSkeleton, ListSkeleton } from "@/components/Skeletons";
-import { getRecentLogs, searchLogs } from "@/lib/queries";
+import { TagChips } from "@/components/TagChips";
+import { getRandomLog, getRecentLogs, getTagCounts, searchLogs } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 
 export default function Home({ searchParams }: PageProps<"/">) {
@@ -53,24 +55,43 @@ async function QuickAdd() {
   return <LogForm userId={user!.id} />;
 }
 
+function param(value: string | string[] | undefined) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 async function Results({ searchParams }: Pick<PageProps<"/">, "searchParams">) {
-  const { q } = await searchParams;
-  const query = typeof q === "string" ? q.trim() : "";
-  const logs = query ? await searchLogs(query) : await getRecentLogs();
+  const params = await searchParams;
+  const query = param(params.q);
+  const tag = param(params.tag);
+
+  const [logs, tags, random] = await Promise.all([
+    query ? searchLogs(query) : getRecentLogs({ tag: tag || undefined }),
+    query ? Promise.resolve([]) : getTagCounts(),
+    query || tag ? Promise.resolve(null) : getRandomLog(),
+  ]);
+
+  const heading = query
+    ? `${logs.length} result${logs.length === 1 ? "" : "s"} for "${query}"`
+    : tag
+      ? `${logs.length} tagged ${tag}`
+      : "Recent";
 
   return (
-    <div className="space-y-2">
-      <p className="px-1 text-xs uppercase tracking-wide text-muted">
-        {query ? `${logs.length} result${logs.length === 1 ? "" : "s"} for "${query}"` : "Recent"}
-      </p>
-      {logs.map((log) => (
-        <LogCard key={log.id} log={log} showSimilarity={!!query} />
-      ))}
-      {logs.length === 0 && (
-        <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted">
-          {query ? "Nothing matches that yet." : "No logs yet. Write down the last interesting thing you learned."}
-        </p>
-      )}
+    <div className="space-y-3">
+      {!query && <TagChips tags={tags} active={tag || null} />}
+      {/* Only worth showing once there's something to forget. */}
+      {random && logs.length >= 5 && <Rediscover initial={random} />}
+      <div className="space-y-2">
+        <p className="px-1 text-xs uppercase tracking-wide text-muted">{heading}</p>
+        {logs.map((log) => (
+          <LogCard key={log.id} log={log} />
+        ))}
+        {logs.length === 0 && (
+          <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted">
+            {query || tag ? "Nothing matches that yet." : "No logs yet. Write down the last interesting thing you learned."}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

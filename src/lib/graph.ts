@@ -31,10 +31,15 @@ function truncate(text: string, max = 42) {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
+// Links kept per log. Measured on real Voyage embeddings, a log's nearest 1-2
+// neighbours are on-topic ~85% of the time and accuracy falls off after that.
+export function defaultK(nodeCount: number) {
+  return Math.max(1, Math.min(3, Math.round(nodeCount / 15)));
+}
+
 // Keep each log's strongest few links, then drop the weakest of those relative
 // to the corpus, so clusters stay distinct instead of becoming one blob.
-export function selectEdges(nodeCount: number, edges: MapEdge[]): MapEdge[] {
-  const k = Math.max(1, Math.min(5, Math.round(nodeCount / 10)));
+export function selectEdges(nodeCount: number, edges: MapEdge[], k = defaultK(nodeCount)): MapEdge[] {
   const bySource = new Map<string, MapEdge[]>();
   for (const e of edges) {
     if (e.source === e.target) continue;
@@ -53,7 +58,7 @@ export function selectEdges(nodeCount: number, edges: MapEdge[]): MapEdge[] {
   return kept.filter((e) => e.similarity >= cutoff);
 }
 
-export function buildGraph(nodes: MapNode[], edges: MapEdge[]): BrainGraph {
+export function buildGraph(nodes: MapNode[], edges: MapEdge[], k?: number): BrainGraph {
   const graph: BrainGraph = new Graph({ type: "undirected", allowSelfLoops: false });
   const ids = new Set(nodes.map((n) => n.id));
 
@@ -73,7 +78,7 @@ export function buildGraph(nodes: MapNode[], edges: MapEdge[]): BrainGraph {
   }
 
   // Union of both directions; keep the stronger similarity for a pair.
-  for (const e of selectEdges(nodes.length, edges)) {
+  for (const e of selectEdges(nodes.length, edges, k)) {
     if (!ids.has(e.source) || !ids.has(e.target)) continue;
     if (graph.hasEdge(e.source, e.target)) {
       const w = graph.getEdgeAttribute(e.source, e.target, "weight");

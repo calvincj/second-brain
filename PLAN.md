@@ -73,8 +73,14 @@ Supabase project (pgvector, RLS, bucket, signups off) · Next.js scaffold · pas
 **Phase 2: Brain map**
 `log_neighbors` · Sigma.js view · ForceAtlas2 worker · auto re-layout + bulk save · interaction-lit edges · search-to-zoom · mobile tuning. ✅ Built (Louvain cluster colouring pulled forward from Phase 3).
 
-**Phase 3: Optional polish**
+**Phase 3: Optional polish** (built: Rediscover card, tag filter chips, background link titles with SSRF guards; remaining items below are still open)
 Optional Claude cluster names · vision caption suggestions for screenshots · auto-fetched link titles (with SSRF guards) · filters · random-fact resurfacing.
+
+## Tuning notes (measured on real voyage-3.5-lite embeddings, 42 labelled facts)
+- Any two short facts score 0.56–0.77 cosine, even unrelated ones (unrelated avg 0.62, related 0.71); queries score 0.40–0.56. Fixed thresholds don't work.
+- Search keeps semantic-only hits within 0.08 of the best match **and** only when ≥2 hits are clear outliers (z ≥ 2): 100% on-topic for relevant queries, empty for queries with no relevant logs ("zzzqqq" otherwise matched at 0.49).
+- Related shows the top 2 plus anything within 0.04 of the closest (≈73% on-topic, 3.5 shown). Raw similarity % is hidden in the UI because it misleads.
+- Map keeps k = clamp(n/15, 1, 3) links per log (k=3 → 7 clusters for 7 topics, 93% purity; k=4 merged topics to 70%). Low-repulsion ForceAtlas2 (scalingRatio 0.5, gravity 0.2) gives ~20% tighter clusters.
 
 ## Verify before building
 - Voyage free-tier rate limits without a card (reportedly ~3 RPM), which affects backfill. Add a card or throttle.

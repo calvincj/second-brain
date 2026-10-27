@@ -2,10 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { embedLogs } from "@/lib/embeddings";
 import { normalizeUrl, parseTags } from "@/lib/format";
-import { searchLogIds } from "@/lib/queries";
+import { fetchLinkTitle } from "@/lib/link-title";
+import { getRandomLog, searchLogIds, type LogWithImage } from "@/lib/queries";
 import { IMAGE_BUCKET } from "@/lib/types";
 
 export type LogInput = {
@@ -59,6 +61,19 @@ async function tryEmbed(
   }
 }
 
+// Fetch the link's page title after the response is sent; never blocks a save.
+function fetchTitleLater(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  id: string,
+  url: string | null,
+) {
+  if (!url) return;
+  after(async () => {
+    const title = await fetchLinkTitle(url);
+    if (title) await supabase.from("logs").update({ source_title: title }).eq("id", id);
+  });
+}
+
 export async function createLog(input: LogInput): Promise<ActionResult> {
   const { supabase, user } = await requireUser();
   const values = validate(input, user.id);
@@ -68,6 +83,7 @@ export async function createLog(input: LogInput): Promise<ActionResult> {
   if (error) return { ok: false, error: error.message };
 
   const embedded = await tryEmbed(supabase, { id: data.id, ...values });
+  fetchTitleLater(supabase, data.id, values.source_url);
   revalidatePath("/");
   return { ok: true, id: data.id, embedded };
 }
@@ -79,15 +95,23 @@ export async function updateLog(id: string, input: LogInput): Promise<ActionResu
 
   const { data: existing } = await supabase
     .from("logs")
-    .select("image_path")
+    .select("image_path, source_url")
     .eq("id", id)
     .single();
+  const urlChanged = existing?.source_url !== values.source_url;
 
   // Clear the embedding so a failed re-embed is picked up by the backfill,
   // and the map position so the log is re-placed by its new meaning.
   const { error } = await supabase
     .from("logs")
-    .update({ ...values, embedding: null, embedding_model: null, x: null, y: null })
+    .update({
+      ...values,
+      embedding: null,
+      embedding_model: null,
+      x: null,
+      y: null,
+      ...(urlChanged ? { source_title: null } : {}),
+    })
     .eq("id", id);
   if (error) return { ok: false, error: error.message };
 
@@ -96,6 +120,7 @@ export async function updateLog(id: string, input: LogInput): Promise<ActionResu
   }
 
   const embedded = await tryEmbed(supabase, { id, ...values });
+  if (urlChanged) fetchTitleLater(supabase, id, values.source_url);
   revalidatePath("/");
   revalidatePath(`/log/${id}`);
   return { ok: true, id, embedded };
@@ -141,4 +166,9 @@ export async function searchMap(query: string): Promise<string[]> {
   await requireUser();
   const q = query.trim();
   return q ? searchLogIds(q) : [];
+}
+
+export async function rediscover(excludeId: string | null): Promise<LogWithImage | null> {
+  await requireUser();
+  return getRandomLog(excludeId);
 }

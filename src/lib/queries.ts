@@ -31,13 +31,11 @@ async function logsByIds(supabase: Supabase, ids: string[], similarity: Map<stri
   return attachImageUrls(supabase, ordered);
 }
 
-export async function getRecentLogs(limit = 100): Promise<LogWithImage[]> {
+export async function getRecentLogs({ tag, limit = 100 }: { tag?: string; limit?: number } = {}): Promise<LogWithImage[]> {
   const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("logs")
-    .select(LOG_COLUMNS)
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  let query = supabase.from("logs").select(LOG_COLUMNS);
+  if (tag) query = query.contains("tags", [tag]);
+  const { data, error } = await query.order("created_at", { ascending: false }).limit(limit);
   if (error) throw error;
   return attachImageUrls(supabase, data as Log[]);
 }
@@ -118,4 +116,24 @@ export async function searchLogIds(query: string): Promise<string[]> {
   });
   if (error) throw error;
   return (data as { id: string }[]).map((r) => r.id);
+}
+
+export async function getTagCounts(): Promise<{ tag: string; n: number }[]> {
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("tag_counts");
+  if (error) throw error;
+  return data as { tag: string; n: number }[];
+}
+
+// A random log for the "Rediscover" card, preferring ones older than a day.
+export async function getRandomLog(excludeId: string | null = null): Promise<LogWithImage | null> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .rpc("random_logs", { n: 1, exclude_id: excludeId })
+    .select(LOG_COLUMNS);
+  if (error) throw error;
+  const rows = data as unknown as Log[];
+  if (!rows.length) return null;
+  const [log] = await attachImageUrls(supabase, rows);
+  return log;
 }

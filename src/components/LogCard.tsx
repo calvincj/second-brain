@@ -2,7 +2,7 @@ import Link from "next/link";
 import { domainOf, timeAgo } from "@/lib/format";
 import type { LogWithImage } from "@/lib/queries";
 
-export function LogCard({ log, showSimilarity = false }: { log: LogWithImage; showSimilarity?: boolean }) {
+export function LogCard({ log }: { log: LogWithImage }) {
   return (
     <Link
       href={`/log/${log.id}`}
@@ -16,11 +16,10 @@ export function LogCard({ log, showSimilarity = false }: { log: LogWithImage; sh
               {tag}
             </span>
           ))}
-          {log.source_url && <span>↗ {domainOf(log.source_url)}</span>}
-          <span>{timeAgo(log.created_at)}</span>
-          {showSimilarity && log.similarity != null && (
-            <span title="Semantic similarity">{Math.round(log.similarity * 100)}% related</span>
+          {log.source_url && (
+            <span className="max-w-[16rem] truncate">↗ {log.source_title ?? domainOf(log.source_url)}</span>
           )}
+          <span suppressHydrationWarning>{timeAgo(log.created_at)}</span>
           {!log.embedding_model && <span title="Not linked to related logs yet">· unlinked</span>}
         </div>
       </div>

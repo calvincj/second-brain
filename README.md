@@ -1,13 +1,13 @@
 # 🧠 2nd Brain
 
 Log facts, stats and phenomena from laptop or phone. Find them by term or by idea.
-See [PLAN.md](PLAN.md) for the full design. Built so far: **Phase 1** (capture, search, related logs) and **Phase 2** (the brain map at `/map`).
+See [PLAN.md](PLAN.md) for the full design. Built so far: **Phase 1** (capture, search, related logs), **Phase 2** (the brain map at `/map`) and most of **Phase 3** (Rediscover card, tag filter, link titles).
 
 ## Setup
 
 ### 1. Supabase
 1. Create a project at [supabase.com](https://supabase.com), region **West US (North California)**.
-2. **SQL Editor** → paste and run [`0001_init.sql`](supabase/migrations/0001_init.sql), then [`0002_brain_map.sql`](supabase/migrations/0002_brain_map.sql), in that order.
+2. **SQL Editor** → paste and run each file in [`supabase/migrations/`](supabase/migrations/) in order: `0001_init.sql`, `0002_brain_map.sql`, `0003_tuning_and_phase3.sql`. (Already ran some? Just run the ones you haven't, in order.)
 3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up". Leave the **Email** provider itself **enabled**.
 4. **Authentication → Users → Add user → Create new user**: your email + a strong password, with **Auto Confirm User** checked. That's your login (no emails are ever sent, so no SMTP setup is needed).
 5. **Project Settings → API Keys**: copy the Project URL, **publishable** key and **secret** key.
@@ -35,6 +35,13 @@ development, a crude offline mock embedding is used so everything still works.
 
 ### 5. Install on your phone
 Open the deployed URL in **Safari** → Share → **Add to Home Screen** → open the app from the icon and sign in **there** (the home-screen app has its own storage, separate from Safari). Save the password to Keychain when iOS offers.
+
+## Tests
+End-to-end smoke test (38 checks: login, logging, search, tags, Rediscover, edit/delete, export, cron, map):
+```bash
+npx supabase start && npx supabase db reset   # local Supabase only; never touches your real project
+npm run test:e2e                               # screenshots land in e2e/out/
+```
 
 ## Backups
 **Export** (top right) downloads every log as JSON; `/api/export?format=md` gives Markdown. Images stay in Supabase Storage.
