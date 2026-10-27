@@ -108,14 +108,11 @@ try {
   // --- first thought: typed in the brain bar, logged with ＋ ----------------------
   const iconPng = OUT + "icon.png";
   fs.writeFileSync(iconPng, Buffer.from(await (await fetch(APP + "/pwa-icon/192")).arrayBuffer()));
-  await page.fill(brainInput, "Octopuses have three hearts and blue copper-based blood");
+  // ＋ with nothing typed opens the full form (for link, image, tags).
   await page.click('button[aria-label="Log a new thought"]');
   await page.waitForSelector("text=New thought");
-  await page.waitForTimeout(300);
-  check(
-    "＋ opens capture prefilled with the typed text",
-    (await page.inputValue('textarea[placeholder="What did you learn?"]')) === "Octopuses have three hearts and blue copper-based blood",
-  );
+  await page.fill('textarea[placeholder="What did you learn?"]', "Octopuses have three hearts and blue copper-based blood");
+  check("＋ on an empty bar opens the full form", true);
   await page.click("text=+ Link & tags");
   await page.fill('input[placeholder^="Tags"]', "biology, ocean");
   await page.fill('input[placeholder^="Source link"]', "https://example.com");
@@ -262,6 +259,12 @@ try {
   await page.waitForTimeout(1200);
   await page.screenshot({ path: OUT + "03-brain-thought.png" });
   await page.locator('aside button[aria-label="Close"]').click();
+  // The tapped thought is now the anchor the brain spins around.
+  check("tapping a thought anchors the brain on it", !!(await page.waitForSelector("text=Orbiting", { timeout: 5000 }).catch(() => null)));
+  await page.screenshot({ path: OUT + "03b-anchor.png" });
+  await page.locator('button[aria-label="Back to the whole brain"]').click();
+  await page.waitForTimeout(400);
+  check("× on the pill goes back to the whole brain", (await page.locator("text=Orbiting").count()) === 0);
   await page.locator('button[aria-label="Clear search"]').click();
 
   await page.fill(brainInput, "octopis");
@@ -284,10 +287,11 @@ try {
   await page.locator('aside button[aria-label="Close"]').click();
 
   // A new thought is born in the brain.
-  // No tags on purpose: its neighbours' shared tags should be suggested.
+  // Typed text + ＋ adds it straight away (no form). No tags on purpose:
+  // its neighbours' shared tags should be suggested.
   await page.fill(brainInput, "Octopus arms contain taste receptors in their suckers");
-  await page.click('button[aria-label="Log a new thought"]');
-  await page.click('button:has-text("Log it")');
+  await page.click('button[aria-label="Add this thought"]');
+  check("typed text + ＋ adds it in one tap (no form)", (await page.locator("text=New thought").count()) === 0);
   const toast = await page.waitForSelector('[role="status"]', { timeout: 10000 });
   const toastText = await toast.innerText();
   check("birth toast says what it connected to", /Connected to:/.test(toastText), toastText.slice(0, 80));

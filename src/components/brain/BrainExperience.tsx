@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import {
   addTags,
   createCaptureToken,
+  createLog,
   deleteLogInPlace,
   getLogDetail,
   restoreLog,
@@ -19,10 +20,10 @@ import {
   type ActionResult,
 } from "@/app/actions";
 import { LogForm } from "@/components/LogForm";
-import type { BrainHandle, RemovedThought } from "@/components/brain/Brain3D";
+import type { Anchor, BrainHandle, RemovedThought } from "@/components/brain/Brain3D";
 import { SearchResults } from "@/components/brain/SearchResults";
 import { buildBrain, type BrainModel } from "@/lib/brain-model";
-import { readMine } from "@/lib/mine";
+import { readMine, rememberMine } from "@/lib/mine";
 import { domainOf } from "@/lib/format";
 import type { BrainSearchResult, LogWithImage } from "@/lib/queries";
 import type { MapEdge, MapNode } from "@/lib/types";
@@ -417,6 +418,33 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
     setSheet({ kind: "region", id });
   }
 
+  // ＋ with text typed: just add it (the card that opens after it's born has
+  // Edit for a link, image or tags). ＋ with nothing typed: the full form.
+  async function quickAdd() {
+    const text = query.trim();
+    setMemory(null);
+    setAway(null);
+    if (!text) {
+      setSheet({ kind: "capture", prefill: "" });
+      return;
+    }
+    if (adding) return;
+    setAdding(true);
+    try {
+      const result = await createLog({ caption: text, tags: "", sourceUrl: "", imagePath: null });
+      if (result.ok) {
+        rememberMine(result.id);
+        onSaved(result);
+      } else {
+        showToast({ text: result.error });
+      }
+    } catch {
+      showToast({ text: "Couldn't save that. Check your connection." });
+    } finally {
+      setAdding(false);
+    }
+  }
+
   // --- A new thought is born -------------------------------------------------------------
   function onSaved(result: Extract<ActionResult, { ok: true }>) {
     setMemory(null);
@@ -521,6 +549,8 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   // Once a day, an older thought you haven't looked at in a while wakes up.
   const [memory, setMemory] = useState<{ id: string; ago: string } | null>(null);
   const [away, setAway] = useState<Away | null>(null);
+  const [anchor, setAnchor] = useState<Anchor>(null);
+  const [adding, setAdding] = useState(false);
   // Bottom sheet on phones: dragged up to full height (per sheet), or down to dismiss.
   const [fullFor, setFullFor] = useState<string | null>(null);
   const [dragY, setDragY] = useState(0);
@@ -698,6 +728,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
           model={initialModel}
           layoutVersion={layoutVersion}
           onReady={() => measureRef.current()}
+          onAnchorChange={setAnchor}
           onSettled={onBrainSettled}
           isMobile={isMobile}
           reducedMotion={reducedMotion}
@@ -916,6 +947,31 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
             </div>
           </div>
         )}
+        {anchor && !sheet && (
+          <div className="brain-fade-in pointer-events-auto mx-auto flex w-fit max-w-full items-center gap-2 rounded-full border border-border bg-surface py-1 pl-3 pr-1 text-xs text-muted backdrop-blur">
+            <span
+              className="h-2.5 w-2.5 shrink-0 rounded-full border-2"
+              style={{
+                borderColor: anchor.kind === "node" ? nodeById.get(anchor.id)?.color : model.regions[anchor.id]?.color,
+              }}
+            />
+            <span className="truncate">
+              Orbiting{" "}
+              <b className="text-text">
+                {anchor.kind === "node"
+                  ? (nodeById.get(anchor.id)?.caption ?? "").slice(0, 38) + ((nodeById.get(anchor.id)?.caption.length ?? 0) > 38 ? "…" : "")
+                  : model.regions[anchor.id]?.name}
+              </b>
+            </span>
+            <button
+              onClick={() => brain.current?.releaseAnchor()}
+              aria-label="Back to the whole brain"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-base hover:bg-surface-2"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {thoughtCount > 0 && thoughtCount < 8 && !sheet && !toast && (
           <p className="pointer-events-auto mx-auto w-fit rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted backdrop-blur">
             Log a few more thoughts and regions will start to form.
@@ -974,7 +1030,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
                   setRecent(readRecent());
                 }}
                 onBlur={() => setFocused(false)}
-                placeholder={thoughtCount ? "Search your brain…" : "Type a thought, then tap ＋"}
+                placeholder={thoughtCount ? "Search or add a thought…" : "Type a thought, then tap ＋"}
                 aria-label="Search your brain"
                 className="h-12 w-full rounded-full border border-border bg-surface pl-5 pr-16 text-text [&::-webkit-search-cancel-button]:appearance-none shadow-[0_0_40px_rgba(94,230,208,0.08)] outline-none backdrop-blur placeholder:text-muted focus:border-accent"
               />
@@ -989,15 +1045,12 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
             </div>
             <button
               type="button"
-              onClick={() => {
-                setMemory(null);
-                setAway(null);
-                setSheet({ kind: "capture", prefill: query.trim() });
-              }}
-              aria-label="Log a new thought"
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-accent text-2xl font-light text-on-accent shadow-[0_0_24px_rgba(94,230,208,0.55)]"
+              onClick={quickAdd}
+              disabled={adding}
+              aria-label={query.trim() ? "Add this thought" : "Log a new thought"}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-accent text-2xl font-light text-on-accent shadow-[0_0_24px_rgba(94,230,208,0.55)] disabled:opacity-70"
             >
-              ＋
+              {adding ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-on-accent border-t-transparent" /> : "＋"}
             </button>
           </form>
         </div>

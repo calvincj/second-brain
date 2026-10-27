@@ -46,9 +46,15 @@ export type BrainHandle = {
   replayBirths: (ids: string[]) => void;
   // "Move to region": regionId null takes it out of regions.
   moveToRegion: (id: string, regionId: number | null) => void;
+  // Back to spinning around the whole brain.
+  releaseAnchor: () => void;
 };
 
 export type RemovedThought = { node: BrainNode; links: BrainLink[]; region: number | null };
+
+// What the brain spins around: a thought you tapped, a region, or (null) the
+// whole brain.
+export type Anchor = { kind: "node"; id: string } | { kind: "region"; id: number } | null;
 
 type Props = {
   model: BrainModel;
@@ -57,6 +63,7 @@ type Props = {
   onReady?: () => void;
   // The first layout has settled (or there was nothing to settle).
   onSettled?: () => void;
+  onAnchorChange?: (anchor: Anchor) => void;
   isMobile: boolean;
   reducedMotion: boolean;
   onSelect: (id: string) => void;
@@ -108,6 +115,25 @@ function makeGlowTexture() {
   return texture;
 }
 
+// A soft ring marking the thought the brain spins around.
+function makeRingTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, "rgba(255,255,255,0)");
+  g.addColorStop(0.72, "rgba(255,255,255,0)");
+  g.addColorStop(0.8, "rgba(255,255,255,0.95)");
+  g.addColorStop(0.88, "rgba(255,255,255,0)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 function idOf(end: string | BrainNode) {
   return typeof end === "string" ? end : end.id;
 }
@@ -121,6 +147,7 @@ export default function Brain3D({
   layoutVersion,
   onReady,
   onSettled,
+  onAnchorChange,
   isMobile,
   reducedMotion,
   onSelect,
@@ -162,8 +189,13 @@ export default function Brain3D({
     pendingTimers.current = [];
     fitOnStop.current = false;
   }
-  const callbacks = useRef({ onSelect, onBackground, onPositionsSettled, onReady, onSettled });
-  callbacks.current = { onSelect, onBackground, onPositionsSettled, onReady, onSettled };
+  const callbacks = useRef({ onSelect, onBackground, onPositionsSettled, onReady, onSettled, onAnchorChange });
+  callbacks.current = { onSelect, onBackground, onPositionsSettled, onReady, onSettled, onAnchorChange };
+  const anchor = useRef<Anchor>(null);
+  // The pivot starts following the anchor once the flight to it has landed.
+  const anchorFollowAt = useRef(0);
+  const anchorRing = useRef<THREE.Sprite | null>(null);
+  const dragging = useRef(false);
   const settledOnce = useRef(false);
   const modelRef = useRef(model);
   const nodeIndex = useRef(new Map<string, BrainNode>());
@@ -291,6 +323,22 @@ export default function Brain3D({
     );
     graph.scene().add(dustPoints);
 
+    const ringTexture = makeRingTexture();
+    const ring = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: ringTexture,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+        opacity: 0,
+      }),
+    );
+    ring.visible = false;
+    ring.renderOrder = 4;
+    graph.scene().add(ring);
+    anchorRing.current = ring;
+
     // Slow auto-rotation until the user takes over; resumes after a while.
     const controls = graph.controls() as { autoRotate: boolean; autoRotateSpeed: number; addEventListener: (e: string, fn: () => void) => void };
     controls.autoRotate = !reducedMotion;
@@ -298,9 +346,17 @@ export default function Brain3D({
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     controls.addEventListener("start", () => {
       controls.autoRotate = false;
+      dragging.current = true;
       clearTimeout(idleTimer);
     });
     controls.addEventListener("end", () => {
+      dragging.current = false;
+      // Panned away from the anchor (two-finger drag): let it go, so the
+      // pivot stays where you put it.
+      const a = anchor.current;
+      const n = a?.kind === "node" ? nodeById(a.id) : undefined;
+      const target = (graph.controls() as { target: THREE.Vector3 }).target;
+      if (n && target.distanceTo(pos(n)) > 12) setAnchor(null, 0);
       clearTimeout(idleTimer);
       if (!reducedMotion) idleTimer = setTimeout(() => (controls.autoRotate = true), 25_000);
     });
@@ -452,6 +508,34 @@ export default function Brain3D({
         }
       }
 
+      // The pivot follows the anchor (a settling thought keeps moving), and
+      // a ring marks an anchored thought.
+      const a = anchor.current;
+      const controls = graph.controls() as { target: THREE.Vector3 };
+      let anchorPos: THREE.Vector3 | null = null;
+      if (a?.kind === "node") {
+        const n = nodeById(a.id);
+        if (n) anchorPos = pos(n);
+      } else if (a?.kind === "region") {
+        const members = (modelRef.current.regions[a.id]?.members ?? []).map(nodeById).filter((n): n is BrainNode => !!n);
+        if (members.length) anchorPos = new THREE.Box3().setFromPoints(members.map(pos)).getCenter(new THREE.Vector3());
+      }
+      if (anchorPos && t > anchorFollowAt.current && !dragging.current) controls.target.lerp(anchorPos, 0.12);
+      const ringSprite = anchorRing.current;
+      if (ringSprite) {
+        const v = a?.kind === "node" ? visuals.current.get(a.id) : undefined;
+        ringSprite.visible = !!(v && anchorPos);
+        if (v && anchorPos) {
+          ringSprite.position.copy(anchorPos);
+          // Hugs the neuron's core (the glow is much larger than the neuron).
+          const core = (v.core.geometry as THREE.SphereGeometry).parameters.radius;
+          const s = core * 7 * (1 + (reducedMotion ? 0 : Math.sin(t * 0.003) * 0.06));
+          ringSprite.scale.set(s, s, 1);
+          (ringSprite.material as THREE.SpriteMaterial).color.copy((v.glow.material as THREE.SpriteMaterial).color);
+          (ringSprite.material as THREE.SpriteMaterial).opacity = 0.45;
+        }
+      }
+
       // Region nebulae and names follow their members.
       for (const r of regionsRef.current) {
         const region = modelRef.current.regions[r.regionId];
@@ -494,6 +578,7 @@ export default function Brain3D({
       resize.disconnect();
       graph._destructor();
       glowTexture.current?.dispose();
+      ringTexture.dispose();
       dust.dispose();
       visualMap.clear();
       el.innerHTML = "";
@@ -809,9 +894,17 @@ export default function Brain3D({
   // fits their bounding sphere against the narrower of the vertical and
   // horizontal fields of view (zoomToFit used only the box, so portrait
   // phones clipped regions as the brain rotated). One thought: fly to it.
+  function setAnchor(next: Anchor, flightMs: number) {
+    anchor.current = next;
+    anchorFollowAt.current = performance.now() + (reducedMotion ? 0 : flightMs) + 50;
+    callbacks.current.onAnchorChange?.(next);
+  }
+
   function frameThoughts(ids: string[] | null, ms: number, rerun = false) {
     const graph = graphRef.current;
     if (!graph) return;
+    // Framing a group (or everything) spins around its centre, not a thought.
+    if (!rerun) setAnchor(null, ms);
     // A re-run (after the UI's covered area changed) must not extend its own window.
     if (!rerun) lastFrame.current = { ids, at: performance.now() };
     let nodes = (ids ? ids.map(nodeById) : modelRef.current.nodes).filter((n): n is BrainNode => !!n && n.x != null);
@@ -1003,6 +1096,13 @@ export default function Brain3D({
       const to = target.clone().add(dir.multiplyScalar(distance));
       (graph.controls() as { autoRotate: boolean }).autoRotate = false;
       graph.cameraPosition({ x: to.x, y: to.y, z: to.z }, { x: target.x, y: target.y, z: target.z }, reducedMotion ? 0 : 1200);
+      // The tapped thought becomes the anchor: the brain now spins around it.
+      setAnchor({ kind: "node", id }, 1200);
+    },
+    releaseAnchor() {
+      wakeRef.current();
+      cancelPending();
+      frameThoughts(null, 900);
     },
     // Frame everything that lit up, so you see the signal spread.
     focusActivation() {
@@ -1025,6 +1125,7 @@ export default function Brain3D({
       if (!graph || !region) return;
       (graph.controls() as { autoRotate: boolean }).autoRotate = false;
       frameThoughts(region.members, 1200);
+      setAnchor({ kind: "region", id: regionId }, 1200);
     },
     fitAll() {
       wakeRef.current();
@@ -1084,6 +1185,7 @@ export default function Brain3D({
       const dir = graph.camera().position.clone().sub(target).normalize();
       const to = target.clone().add(dir.multiplyScalar(mobileRef.current ? 190 : 150));
       graph.cameraPosition({ x: to.x, y: to.y, z: to.z }, { x: target.x, y: target.y, z: target.z }, reducedMotion ? 0 : 2600);
+      setAnchor({ kind: "node", id }, 2600);
       // It wakes: a soft glow that swells, then signals to its neighbours.
       later(() => {
         v.target = 0.7;
@@ -1214,6 +1316,7 @@ export default function Brain3D({
         links: current.links.filter((l) => !links.includes(l)),
       });
       if (selected.current === id) selected.current = null;
+      if (anchor.current?.kind === "node" && anchor.current.id === id) setAnchor(null, 0);
       // Forget everything about it: firing state, labels, pulses, GPU memory.
       activation.current.delete(id);
       labelled.current.delete(id);
