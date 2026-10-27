@@ -166,16 +166,31 @@ export async function retryEmbedding(id: string): Promise<boolean> {
   return embedded;
 }
 
+// Soft delete: the log disappears everywhere at once (RLS hides it) and the
+// daily cron purges it a week later, so Undo survives the app being closed.
+// Falls back to a hard delete if migration 0006 hasn't been run yet.
 async function removeLog(id: string) {
   const { supabase } = await requireUser();
-  const { data } = await supabase.from("logs").select("image_path").eq("id", id).single();
-  const { error } = await supabase.from("logs").delete().eq("id", id);
-  if (data?.image_path) {
-    await supabase.storage.from(IMAGE_BUCKET).remove([data.image_path]);
+  const { data: deleted, error } = await supabase.rpc("soft_delete_log", { target_id: id });
+  if (error?.code === "PGRST202" || error?.code === "42883") {
+    const { data } = await supabase.from("logs").select("image_path").eq("id", id).single();
+    const hard = await supabase.from("logs").delete().eq("id", id);
+    if (data?.image_path) await supabase.storage.from(IMAGE_BUCKET).remove([data.image_path]);
+    revalidatePath("/");
+    revalidatePath("/list");
+    return !hard.error;
   }
   revalidatePath("/");
   revalidatePath("/list");
-  return !error;
+  return !error && deleted === true;
+}
+
+export async function restoreLog(id: string): Promise<boolean> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase.rpc("restore_log", { target_id: id });
+  revalidatePath("/");
+  revalidatePath("/list");
+  return !error && data === true;
 }
 
 export async function deleteLog(id: string) {

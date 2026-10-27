@@ -2,6 +2,8 @@
 
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
+// @ts-expect-error -- d3-force-3d ships no types
+import { forceCollide } from "d3-force-3d";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -63,7 +65,7 @@ type Visual = {
   labelBase: [number, number];
 };
 
-type Pulse = { sprite: THREE.Sprite; from: BrainNode; to: BrainNode; start: number; duration: number };
+type Pulse = { sprite: THREE.Sprite; from: BrainNode; to: BrainNode; start: number; duration: number; ambient: boolean };
 
 const BACKGROUND = "#04050c";
 const DIM_LINK = "rgba(110,120,180,0.22)";
@@ -107,6 +109,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
   const regionsRef = useRef<{ nebula: THREE.Sprite; label: SpriteText; labelBase: [number, number]; regionId: number }[]>([]);
   const glowTexture = useRef<THREE.Texture | null>(null);
   const settleRef = useRef<{ pending: boolean; ids: Set<string> }>({ pending: false, ids: new Set() });
+  // Re-frame once a layout settles (regions spread apart while settling).
+  const fitOnStop = useRef(false);
   const callbacks = useRef({ onSelect, onBackground, onPositionsSettled });
   callbacks.current = { onSelect, onBackground, onPositionsSettled };
   const modelRef = useRef(model);
@@ -139,6 +143,10 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         el.style.cursor = node ? "pointer" : "grab";
       })
       .onEngineStop(() => {
+        if (fitOnStop.current) {
+          fitOnStop.current = false;
+          graph.zoomToFit(reducedMotion ? 0 : 1200, isMobile ? 30 : 60);
+        }
         const settle = settleRef.current;
         const nodes = graph.graphData().nodes;
         nodes.forEach((n) => {
@@ -175,15 +183,19 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       composer.addPass(new OutputPass());
     }
 
-    // Forces: similar thoughts sit close; regions hold together like lobes.
+    // Forces, tuned offline on 42 real facts (vs. the first version: regions
+    // 60% further apart, link lengths 39% and neighbour spacing 52% more even):
+    // similar thoughts sit close; regions hold together like lobes and keep a
+    // clear gap from each other; neurons never overlap.
     const linkForce = graph.d3Force("link") as unknown as { distance: (fn: (l: BrainLink) => number) => void } | undefined;
-    linkForce?.distance((l) => 16 + (1 - l.weight) * 38);
+    linkForce?.distance((l) => 22 + (1 - l.weight) * 18);
     const charge = graph.d3Force("charge") as unknown as
       | { strength: (n: number) => { distanceMax: (n: number) => void } }
       | undefined;
-    // Short-range repulsion: keeps neurons apart without flinging regions away.
-    charge?.strength(-30).distanceMax(90);
+    charge?.strength(-15).distanceMax(90);
+    graph.d3Force("collide", forceCollide(12).strength(0.9).iterations(2));
     graph.d3Force("region", regionCohesion());
+    graph.d3Force("separation", regionSeparation());
     graph.d3Force("gravity", gravity());
 
     // Star dust for depth.
@@ -226,7 +238,14 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       if (!reducedMotion) idleTimer = setTimeout(() => (controls.autoRotate = true), 25_000);
     });
 
-    const resize = new ResizeObserver(() => graph.width(el.clientWidth).height(el.clientHeight));
+    const resize = new ResizeObserver(() => {
+      wakeRef.current();
+      graph.width(el.clientWidth).height(el.clientHeight);
+    });
+    const onVisible = () => {
+      if (!document.hidden) wakeRef.current();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     resize.observe(el);
 
     // --- Animation loop: twinkle, activation glow, pulses, regions ---------------
@@ -247,7 +266,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     const tick = (t: number) => {
       frame = requestAnimationFrame(tick);
       if (document.hidden || paused.current) return;
-      if (t - lastInteraction.current > 45_000 && pulses.current.length === 0) {
+      // Ambient sparks don't count as activity; real firing does.
+      if (t - lastInteraction.current > 45_000 && !pulses.current.some((p) => !p.ambient)) {
         paused.current = true;
         graph.pauseAnimation();
         return;
@@ -266,6 +286,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       const anyActive = activation.current.size > 0 || selected.current != null;
       const focus = selected.current ? new Set([selected.current, ...neighborsOf(selected.current)]) : null;
 
+      const labelCandidates: { v: Visual; priority: number }[] = [];
       for (const [id, v] of visuals.current) {
         v.level += (v.target - v.level) * 0.1;
         v.flash *= 0.92;
@@ -284,8 +305,25 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
           if (showLabel) {
             screenScale(v.label, v.labelBase, isMobile ? 17 : 19);
             v.label.position.set(0, -(v.baseScale * 0.55 + 3), 0);
+            const priority = id === selected.current ? 3 : id === hovered.current ? 2 : 1 + v.level;
+            labelCandidates.push({ v, priority });
           }
         }
+      }
+
+      // Never let labels pile up: keep the most important, hide any overlap.
+      const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
+      const labelPx = isMobile ? 17 : 19;
+      labelCandidates.sort((a, b) => b.priority - a.priority);
+      for (const { v } of labelCandidates) {
+        const label = v.label!;
+        const w = label.getWorldPosition(new THREE.Vector3());
+        const p = graph.graph2ScreenCoords(w.x, w.y, w.z);
+        const width = (v.labelBase[0] / v.labelBase[1]) * labelPx;
+        const rect = { x0: p.x - width / 2, y0: p.y - labelPx / 2, x1: p.x + width / 2, y1: p.y + labelPx / 2 };
+        const clash = placed.some((o) => rect.x0 < o.x1 && rect.x1 > o.x0 && rect.y0 < o.y1 && rect.y1 > o.y0);
+        label.visible = !clash;
+        if (!clash) placed.push(rect);
       }
 
       // Pulses travel neuron to neuron; the target flares when one arrives.
@@ -307,7 +345,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       });
 
       // Ambient sparks along random connections.
-      if (!reducedMotion && t - lastSpark > 1400 && modelRef.current.links.length) {
+      if (!reducedMotion && t - lastSpark > 1400 && t - lastInteraction.current < 30_000 && modelRef.current.links.length) {
         lastSpark = t;
         // Bridges get a disproportionate share of the sparks.
         const links = modelRef.current.links;
@@ -319,13 +357,17 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         const pool = bridges.length && Math.random() < 0.4 ? bridges : links;
         const l = pool[Math.floor(Math.random() * pool.length)];
         const [a, b] = [l.source, l.target].map((e) => nodeById(idOf(e)));
-        if (a && b) spawnPulse(Math.random() < 0.5 ? a : b, Math.random() < 0.5 ? b : a, 0, 1600, 0.45);
+        if (a && b) {
+          const [from, to] = Math.random() < 0.5 ? [a, b] : [b, a];
+          spawnPulse(from, to, 0, 1600, 0.45, true);
+        }
       }
 
       // Region nebulae and names follow their members.
       for (const r of regionsRef.current) {
         const region = modelRef.current.regions[r.regionId];
-        const members = region.members.map(nodeById).filter((n): n is BrainNode => !!n);
+        const members = (region?.members ?? []).map(nodeById).filter((n): n is BrainNode => !!n);
+        r.nebula.visible = r.label.visible = members.length > 0;
         if (!members.length) continue;
         const c = members.reduce((acc, n) => acc.add(pos(n)), new THREE.Vector3()).divideScalar(members.length);
         const spread = Math.sqrt(members.reduce((s, n) => s + pos(n).distanceToSquared(c), 0) / members.length);
@@ -336,6 +378,9 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         (r.nebula.material as THREE.SpriteMaterial).opacity = anyActive ? (regionActive ? 0.22 : 0.04) : 0.15;
         r.label.position.set(c.x, c.y + spread * 0.9 + 6, c.z);
         screenScale(r.label, r.labelBase, isMobile ? 13 : 15);
+        // Hide a region name that would sit under the floating top chips.
+        const sp = graph.graph2ScreenCoords(r.label.position.x, r.label.position.y, r.label.position.z);
+        if (sp.y < (isMobile ? 120 : 110)) r.label.visible = false;
         (r.label.material as THREE.SpriteMaterial).opacity = anyActive && !regionActive ? 0.25 : 0.9;
       }
     };
@@ -347,6 +392,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       clearTimeout(idleTimer);
       el.removeEventListener("pointerdown", wakeUp);
       el.removeEventListener("wheel", wakeUp);
+      document.removeEventListener("visibilitychange", onVisible);
       resize.disconnect();
       graph._destructor();
       glowTexture.current?.dispose();
@@ -408,7 +454,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       color: color.clone().lerp(new THREE.Color("#ffffff"), 0.35),
       transparent: true,
     });
-    const radius = 0.9 + Math.min(1.1, Math.sqrt(node.degree) * 0.35);
+    // Sized for the spread-out layout (regions sit well apart).
+    const radius = 1.3 + Math.min(1.5, Math.sqrt(node.degree) * 0.45);
     const core = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 12), coreMaterial);
     const glow = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -420,7 +467,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         opacity: 0.6,
       }),
     );
-    const baseScale = (node.embedded ? 11 : 7) + Math.min(10, node.degree * 1.8);
+    const baseScale = (node.embedded ? 16 : 10) + Math.min(14, node.degree * 2.5);
     glow.scale.set(baseScale, baseScale, 1);
     group.add(glow, core);
     const existing = visuals.current.get(node.id);
@@ -469,7 +516,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     object.scale.set((base[0] / base[1]) * h, h, 1);
   }
 
-  function spawnPulse(from: BrainNode, to: BrainNode, delay: number, duration: number, opacity = 1) {
+  function spawnPulse(from: BrainNode, to: BrainNode, delay: number, duration: number, opacity = 1, ambient = false) {
     const graph = graphRef.current;
     if (!graph) return;
     const sprite = new THREE.Sprite(
@@ -485,7 +532,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     sprite.position.copy(pos(from));
     sprite.scale.set(0.01, 0.01, 1);
     graph.scene().add(sprite);
-    pulses.current.push({ sprite, from, to, start: performance.now() + delay, duration });
+    pulses.current.push({ sprite, from, to, start: performance.now() + delay, duration, ambient });
   }
 
   // Gentle pull toward the centre so regions pack together like lobes of one
@@ -499,6 +546,51 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         n.vx = (n.vx ?? 0) - (n.x ?? 0) * k;
         n.vy = (n.vy ?? 0) - (n.y ?? 0) * k;
         n.vz = (n.vz ?? 0) - (n.z ?? 0) * k;
+      }
+    };
+    force.initialize = (n: BrainNode[]) => (nodes = n);
+    return force;
+  }
+
+  // Pushes regions apart until there's a clear gap between them (their
+  // centres at least 1.4x their combined radii), so lobes read as distinct.
+  function regionSeparation() {
+    let nodes: BrainNode[] = [];
+    const force = (alpha: number) => {
+      const groups = new Map<number, BrainNode[]>();
+      for (const n of nodes) {
+        if (n.region == null) continue;
+        const g = groups.get(n.region) ?? [];
+        g.push(n);
+        groups.set(n.region, g);
+      }
+      const regions = [...groups.values()].map((m) => {
+        const c = m.reduce((acc, n) => acc.add(pos(n)), new THREE.Vector3()).divideScalar(m.length);
+        const r = Math.sqrt(m.reduce((s, n) => s + pos(n).distanceToSquared(c), 0) / m.length);
+        return { m, c, r };
+      });
+      for (let i = 0; i < regions.length; i++) {
+        for (let j = i + 1; j < regions.length; j++) {
+          const a = regions[i];
+          const b = regions[j];
+          const v = b.c.clone().sub(a.c);
+          const d = v.length() || 1;
+          const want = (a.r + b.r) * 1.4;
+          if (d >= want) continue;
+          const push = ((want - d) / d) * 5 * alpha;
+          for (const n of a.m) {
+            if (n.fx != null) continue;
+            n.vx = (n.vx ?? 0) - v.x * push;
+            n.vy = (n.vy ?? 0) - v.y * push;
+            n.vz = (n.vz ?? 0) - v.z * push;
+          }
+          for (const n of b.m) {
+            if (n.fx != null) continue;
+            n.vx = (n.vx ?? 0) + v.x * push;
+            n.vy = (n.vy ?? 0) + v.y * push;
+            n.vz = (n.vz ?? 0) + v.z * push;
+          }
+        }
       }
     };
     force.initialize = (n: BrainNode[]) => (nodes = n);
@@ -559,6 +651,58 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     });
   }
 
+  // Re-applies the model to the graph. Settled thoughts stay pinned; `moving`
+  // ones (plus any still settling after a birth) are free to find their place,
+  // and their new positions are saved when the simulation stops.
+  function rewire(moving: string[]) {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const settle = settleRef.current;
+    const free = new Set([...(settle.pending ? settle.ids : []), ...moving]);
+    modelRef.current.nodes.forEach((n) => {
+      if (!n.embedded) return; // parked on the outer shell, fixed
+      if (free.has(n.id)) {
+        n.fx = n.fy = n.fz = undefined;
+      } else {
+        n.fx = n.x;
+        n.fy = n.y;
+        n.fz = n.z;
+      }
+    });
+    if (moving.length) settleRef.current = { pending: true, ids: free };
+    graph
+      .cooldownTime(free.size ? 1800 : 0)
+      .cooldownTicks(free.size ? Infinity : 0)
+      .graphData({ nodes: modelRef.current.nodes, links: modelRef.current.links });
+    refreshLinks();
+  }
+
+  // The region most of these neighbours belong to.
+  function voteRegion(neighborIds: string[]): number | null {
+    const votes = new Map<number, number>();
+    for (const id of neighborIds) {
+      const r = nodeById(id)?.region;
+      if (r != null) votes.set(r, (votes.get(r) ?? 0) + 1);
+    }
+    return [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  }
+
+  // Moves a thought between regions and recolours its neuron.
+  function setRegion(node: BrainNode, region: number | null) {
+    const regions = modelRef.current.regions;
+    if (node.region === region) return;
+    if (node.region != null) regions[node.region].members = regions[node.region].members.filter((m) => m !== node.id);
+    if (region != null) regions[region].members.push(node.id);
+    node.region = region;
+    node.color = region == null ? LONE_COLOR : regions[region].color;
+    const v = visuals.current.get(node.id);
+    if (v) {
+      const color = new THREE.Color(node.color);
+      v.coreMaterial.color.copy(color.clone().lerp(new THREE.Color("#ffffff"), 0.35));
+      (v.glow.material as THREE.SpriteMaterial).color.copy(color);
+    }
+  }
+
   // --- Data -> scene ----------------------------------------------------------------
   useEffect(() => {
     const graph = graphRef.current;
@@ -604,6 +748,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     });
 
     settleRef.current = { pending: unplaced.length > 0, ids: new Set(unplaced.map((n) => n.id)) };
+    fitOnStop.current = unplaced.length > 0;
     graph
       .cooldownTime(unplaced.length ? (firstLayout ? 7000 : 2500) : 0)
       .cooldownTicks(unplaced.length ? Infinity : 0)
@@ -698,6 +843,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       return modelRef.current;
     },
     setViewShift(fraction) {
+      wakeRef.current();
       viewShift.current.target = fraction;
     },
     pulseFrom(id) {
@@ -723,12 +869,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, defaultK(current.nodes.length + 1));
       // Join the region most of its neighbours belong to.
-      const votes = new Map<number, number>();
-      top.forEach((e) => {
-        const r = byId.get(e.target)!.region;
-        if (r != null) votes.set(r, (votes.get(r) ?? 0) + 1);
-      });
-      const region = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+      const region = voteRegion(top.map((e) => e.target));
       // Born just in front of the camera, then pulled to where it belongs.
       const cam = graph.camera().position;
       const birth = cam.clone().multiplyScalar(0.5);
@@ -745,19 +886,9 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         degree: top.length,
       };
       const links: BrainLink[] = top.map((e) => ({ key: `${node.id}-${e.target}`, source: node.id, target: e.target, weight: 0.75 }));
-      current.nodes.forEach((n) => {
-        n.fx = n.x;
-        n.fy = n.y;
-        n.fz = n.z;
-      });
       if (region != null) current.regions[region].members.push(node.id);
       setModel({ ...current, nodes: [...current.nodes, brainNode], links: [...current.links, ...links] });
-      settleRef.current = { pending: node.embedded, ids: new Set([node.id]) };
-      graph
-        .cooldownTime(2500)
-        .cooldownTicks(Infinity)
-        .graphData({ nodes: modelRef.current.nodes, links: modelRef.current.links });
-      refreshLinks();
+      rewire(node.embedded ? [node.id] : []);
       // Connections light up as the new neuron settles.
       setTimeout(() => {
         const v = visuals.current.get(node.id);
@@ -775,10 +906,9 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     },
     updateThought(node, neighbors) {
       wakeRef.current();
-      const graph = graphRef.current;
       const current = modelRef.current;
       const existing = nodeById(node.id);
-      if (!graph || !existing) return;
+      if (!graphRef.current || !existing) return;
       existing.caption = node.caption;
       existing.tags = node.tags;
       existing.embedded = node.embedded;
@@ -789,20 +919,16 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         .slice(0, defaultK(current.nodes.length));
       const kept = current.links.filter((l) => idOf(l.source) !== node.id && idOf(l.target) !== node.id);
       const added: BrainLink[] = top.map((e) => ({ key: `${node.id}-${e.target}`, source: node.id, target: e.target, weight: 0.75 }));
+      // Its meaning changed: re-vote its region from the new neighbours.
+      setRegion(existing, voteRegion(top.map((e) => e.target)));
       setModel({ ...current, links: [...kept, ...added] });
-      // Rebuild its label with the new caption.
       const v = visuals.current.get(node.id);
       if (v?.label) {
         v.group.remove(v.label);
         v.label = null;
       }
-      current.nodes.forEach((n) => {
-        n.fx = n.x;
-        n.fy = n.y;
-        n.fz = n.z;
-      });
-      graph.cooldownTime(0).graphData({ nodes: modelRef.current.nodes, links: modelRef.current.links });
-      refreshLinks();
+      // Let it drift to where its new connections pull it.
+      rewire([node.id]);
       setTimeout(() => {
         const from = nodeById(node.id);
         if (v) v.flash = 1;
@@ -810,43 +936,58 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
           const to = nodeById(e.target);
           if (from && to) spawnPulse(from, to, i * 150, 600);
         });
-      }, 100);
+      }, 300);
     },
     removeThought(id) {
       wakeRef.current();
-      const graph = graphRef.current;
       const current = modelRef.current;
       const node = nodeById(id);
-      if (!graph || !node) return null;
+      if (!graphRef.current || !node) return null;
       const links = current.links.filter((l) => idOf(l.source) === id || idOf(l.target) === id);
       const region = node.region;
       if (region != null) current.regions[region].members = current.regions[region].members.filter((m) => m !== id);
-      current.nodes.forEach((n) => {
-        n.fx = n.x;
-        n.fy = n.y;
-        n.fz = n.z;
-      });
       setModel({
         ...current,
         nodes: current.nodes.filter((n) => n.id !== id),
         links: current.links.filter((l) => !links.includes(l)),
       });
       if (selected.current === id) selected.current = null;
-      graph.cooldownTime(0).graphData({ nodes: modelRef.current.nodes, links: modelRef.current.links });
-      refreshLinks();
+      // Forget everything about it: firing state, labels, pulses, GPU memory.
+      activation.current.delete(id);
+      labelled.current.delete(id);
+      pulses.current = pulses.current.filter((p) => {
+        if (p.from.id !== id && p.to.id !== id) return true;
+        graphRef.current!.scene().remove(p.sprite);
+        (p.sprite.material as THREE.SpriteMaterial).dispose();
+        return false;
+      });
+      const v = visuals.current.get(id);
+      if (v) {
+        v.core.geometry.dispose();
+        v.coreMaterial.dispose();
+        (v.glow.material as THREE.SpriteMaterial).dispose();
+        visuals.current.delete(id);
+      }
+      settleRef.current.ids.delete(id);
+      rewire([]);
       return { node, links, region };
     },
     restoreThought(removed) {
       wakeRef.current();
-      const graph = graphRef.current;
       const current = modelRef.current;
-      if (!graph || nodeById(removed.node.id)) return;
+      if (!graphRef.current || nodeById(removed.node.id)) return;
       if (removed.region != null) current.regions[removed.region]?.members.push(removed.node.id);
-      setModel({ ...current, nodes: [...current.nodes, removed.node], links: [...current.links, ...removed.links] });
-      graph.cooldownTime(0).graphData({ nodes: modelRef.current.nodes, links: modelRef.current.links });
-      refreshLinks();
-      const v = visuals.current.get(removed.node.id);
-      if (v) v.flash = 1;
+      // Only links whose other end still exists.
+      const links = removed.links.filter((l) => {
+        const other = idOf(l.source) === removed.node.id ? idOf(l.target) : idOf(l.source);
+        return !!nodeById(other);
+      });
+      setModel({ ...current, nodes: [...current.nodes, removed.node], links: [...current.links, ...links] });
+      rewire([]);
+      setTimeout(() => {
+        const v = visuals.current.get(removed.node.id);
+        if (v) v.flash = 1;
+      }, 50);
     },
   }));
 

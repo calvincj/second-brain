@@ -323,17 +323,24 @@ try {
   const afterDelete = (await page.locator("p:has-text('thoughts ·')").innerText()).split(" ")[0];
   await page.click('button[aria-label="Menu"]');
   await page.locator('[role="status"] button:has-text("Undo")').click();
-  await page.waitForTimeout(6000);
-  const stillThere = await (await admin(`/rest/v1/logs?select=id&id=eq.${edited[0].id}`)).json();
-  check("delete hides the neuron, undo restores it", afterDelete === String(COUNT) && stillThere.length === 1, `count after delete ${afterDelete}`);
+  await page.waitForSelector('[role="status"] >> text=Restored', { timeout: 8000 });
+  const stillThere = await (await admin(`/rest/v1/logs?select=deleted_at&id=eq.${edited[0].id}`)).json();
+  check("delete hides the neuron, undo restores it", afterDelete === String(COUNT) && stillThere[0]?.deleted_at === null, `count after delete ${afterDelete}`);
 
   // Delete for real.
   await page.locator('nav[aria-label="Thoughts by region"] button:has-text("edits work")').first().evaluate((b) => b.click());
   await page.waitForSelector('aside button:has-text("Delete")');
   await page.locator('aside button:has-text("Delete")').click();
-  await page.waitForTimeout(6500);
-  const gone = await (await admin(`/rest/v1/logs?select=id&id=eq.${edited[0].id}`)).json();
-  check("delete without undo removes it", gone.length === 0);
+  await page.waitForTimeout(1500);
+  const gone = await (await admin(`/rest/v1/logs?select=deleted_at&id=eq.${edited[0].id}`)).json();
+  check("delete marks it deleted immediately (survives closing the app)", !!gone[0]?.deleted_at);
+  const listNow = await page.evaluate(async () => (await fetch("/api/export")).json());
+  check("deleted thoughts vanish from everything (export)", !listNow.logs.some((l) => l.caption.includes("edits work")));
+  // Pretend it was deleted 8 days ago: the cron purges it for good.
+  await admin(`/rest/v1/logs?id=eq.${edited[0].id}`, { method: "PATCH", body: JSON.stringify({ deleted_at: new Date(Date.now() - 8 * 864e5).toISOString() }) });
+  const purge = await (await fetch(APP + "/api/cron", { headers: { Authorization: `Bearer ${CRON_SECRET}` } })).json();
+  const purged = await (await admin(`/rest/v1/logs?select=id&id=eq.${edited[0].id}`)).json();
+  check("cron purges week-old deletions", purge.purged === 1 && purged.length === 0, JSON.stringify(purge));
   check("hidden accessible list mirrors the brain", (await page.locator('nav[aria-label="Thoughts by region"] li').count()) >= 3);
 
   // Reopening keeps the layout stable.
@@ -343,6 +350,11 @@ try {
   await page.waitForTimeout(2500);
   const pos2 = await (await admin("/rest/v1/logs?select=id,x,y,z&order=id")).json();
   check("reopening the brain keeps the layout stable", JSON.stringify(pos1) === JSON.stringify(pos2));
+
+  await page.goto(APP + "/?capture=1");
+  await page.waitForSelector("text=New thought", { timeout: 20000 });
+  check("/?capture=1 opens straight into logging", true);
+  await page.locator('aside button[aria-label="Close"]').click();
 
   // --- menu + sign out ------------------------------------------------------------------------
   await page.click('button[aria-label="Menu"]');

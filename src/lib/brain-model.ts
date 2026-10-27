@@ -74,6 +74,13 @@ const STOPWORDS = new Set(
   ),
 );
 
+// Words too generic to name a region after ("Years", "Two", "People").
+const GENERIC = new Set(
+  "one two three four five six seven eight nine ten hundred thousand million billion trillion half third percent times time year years day days week weeks month months hour hours minute minutes second seconds people person thing things way ways part parts lot lots kind kinds number numbers average around nearly almost only also even still every each other another first last next new old older newer large larger largest small smaller big bigger biggest high higher low lower long longer short more most less least many much few after before during while since because however although like than then there here make makes made take takes took get gets got use uses used called known found seen say says said due about over under into across between same different whole entire world blue red green black white".split(
+    " ",
+  ),
+);
+
 function titleCase(s: string) {
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -91,7 +98,9 @@ export function regionNameCandidates(members: MapNode[], all: MapNode[]): string
   const words = (nodes: MapNode[]) => {
     const counts = new Map<string, number>();
     for (const n of nodes) {
-      const seen = new Set((n.caption.toLowerCase().match(/[a-z][a-z-]{2,}/g) ?? []).filter((w) => !STOPWORDS.has(w)));
+      const seen = new Set(
+        (n.caption.toLowerCase().match(/[a-z][a-z-]{2,}/g) ?? []).filter((w) => !STOPWORDS.has(w) && !GENERIC.has(w)),
+      );
       for (const w of seen) counts.set(w, (counts.get(w) ?? 0) + 1);
     }
     return counts;
@@ -132,6 +141,22 @@ function nameRegions(groups: string[][], byId: Map<string, MapNode>, all: MapNod
   });
 }
 
+// A region keeps its colour as it grows or shrinks: the colour comes from a
+// hash of one of its members (the smallest id), not from its size rank.
+// Collisions take the next free colour.
+function stableColors(groups: string[][]): string[] {
+  const used = new Set<number>();
+  return groups.map((members) => {
+    const anchor = [...members].sort()[0];
+    let h = 0;
+    for (let i = 0; i < anchor.length; i++) h = (Math.imul(h, 31) + anchor.charCodeAt(i)) | 0;
+    let idx = Math.abs(h) % REGION_COLORS.length;
+    for (let k = 0; k < REGION_COLORS.length && used.has(idx); k++) idx = (idx + 1) % REGION_COLORS.length;
+    used.add(idx);
+    return REGION_COLORS[idx];
+  });
+}
+
 export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
   const ids = new Set(nodes.map((n) => n.id));
   const graph = new Graph({ type: "undirected" });
@@ -166,6 +191,10 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
   const regionGroups = [...groups.values()].filter((m) => m.length >= minSize);
   const groupOf = new Map<string, string[]>();
   regionGroups.forEach((g) => g.forEach((id) => groupOf.set(id, g)));
+  // Only a genuinely strong link pulls a straggler into a region; weak ones
+  // dragged unrelated facts in (history facts landing in "Space").
+  const allWeights = graph.mapEdges((_, a) => a.weight as number).sort((a, b) => a - b);
+  const attachMin = allWeights.length ? allWeights[Math.floor(allWeights.length / 2)] : 0;
   for (let pass = 0; pass < 3; pass++) {
     let changed = false;
     for (const n of nodes) {
@@ -180,7 +209,7 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
           bestWeight = a.weight as number;
         }
       });
-      if (best) {
+      if (best && bestWeight >= attachMin) {
         best.push(n.id);
         groupOf.set(n.id, best);
         changed = true;
@@ -190,10 +219,11 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
   }
   const sortedGroups = regionGroups.sort((a, b) => b.length - a.length);
   const names = nameRegions(sortedGroups, byId, nodes);
+  const colors = stableColors(sortedGroups);
   const regions: Region[] = sortedGroups.map((members, i) => ({
     id: i,
     name: names[i],
-    color: REGION_COLORS[i % REGION_COLORS.length],
+    color: colors[i],
     members,
   }));
   const regionOf = new Map<string, number>();

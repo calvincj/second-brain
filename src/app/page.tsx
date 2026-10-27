@@ -6,11 +6,11 @@ import { createClient } from "@/lib/supabase/server";
 
 export const viewport: Viewport = { themeColor: "#04050c" };
 
-export default function BrainPage() {
+export default function BrainPage({ searchParams }: PageProps<"/">) {
   return (
     <main className="brain-scope fixed inset-0">
       <Suspense fallback={<WakingUp />}>
-        <Brain />
+        <Brain searchParams={searchParams} />
       </Suspense>
     </main>
   );
@@ -25,8 +25,10 @@ function WakingUp() {
   );
 }
 
-async function Brain() {
+async function Brain({ searchParams }: Pick<PageProps<"/">, "searchParams">) {
   const supabase = await createClient();
-  const [{ data }, { nodes, edges }] = await Promise.all([supabase.auth.getUser(), getMapData()]);
-  return <BrainExperience userId={data.user!.id} nodes={nodes} edges={edges} />;
+  const [{ data }, { nodes, edges }, params] = await Promise.all([supabase.auth.getUser(), getMapData(), searchParams]);
+  // "/?capture=1" (e.g. from an iPhone Shortcut) opens straight into logging.
+  const capture = params.capture === "1";
+  return <BrainExperience userId={data.user!.id} nodes={nodes} edges={edges} startCapture={capture} />;
 }

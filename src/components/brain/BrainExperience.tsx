@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition } from "react";
-import { addTags, deleteLogInPlace, getLogDetail, savePositions, searchMap, signOut, type ActionResult } from "@/app/actions";
+import { addTags, deleteLogInPlace, getLogDetail, restoreLog, savePositions, searchMap, signOut, type ActionResult } from "@/app/actions";
 import { LogForm } from "@/components/LogForm";
 import type { BrainHandle, RemovedThought } from "@/components/brain/Brain3D";
 import { SearchResults } from "@/components/brain/SearchResults";
@@ -30,7 +30,7 @@ function BrainLoading() {
 
 type Sheet = { kind: "node"; id: string } | { kind: "region"; id: number } | { kind: "capture"; prefill: string } | null;
 
-type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[] };
+type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[]; startCapture?: boolean };
 
 type Toast = { text: string; id?: string; suggestions?: string[]; action?: { label: string; run: () => void } };
 
@@ -53,7 +53,7 @@ function rememberSearch(q: string) {
   }
 }
 
-export function BrainExperience({ userId, nodes, edges }: Props) {
+export function BrainExperience({ userId, nodes, edges, startCapture = false }: Props) {
   const brain = useRef<BrainHandle>(null);
   // The renderer owns the live model after mount (it adds new thoughts itself),
   // so it gets a stable initial model; the UI keeps a copy refreshed on births.
@@ -69,7 +69,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   const [focused, setFocused] = useState(false);
   const [recent, setRecent] = useState<string[]>([]);
   const [searching, startSearch] = useTransition();
-  const [sheet, setSheet] = useState<Sheet>(null);
+  const [sheet, setSheet] = useState<Sheet>(startCapture ? { kind: "capture", prefill: "" } : null);
   const [trail, setTrail] = useState<string[]>([]);
   const [detail, setDetail] = useState<LogWithImage | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -83,6 +83,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   const lastSemantic = useRef<string | null>(null);
   const selectedRef = useRef<string | null>(null);
   const sheetRef = useRef<Sheet>(null);
+  const birthTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingTags = useRef<{ id: string; tags: string[]; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // Server renders without the hint; the browser checks if it was dismissed.
   const hintStored = useSyncExternalStore(
@@ -179,7 +180,8 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   }
 
   // --- Selecting a thought: it fires, the camera flies there, details load ---------
-  function openNode(id: string, { fromTrail = false } = {}) {
+  function openNode(id: string, { fromTrail = false, auto = false } = {}) {
+    if (!auto) clearTimeout(birthTimer.current);
     const b = brain.current;
     if (!b) return;
     b.select(id);
@@ -261,6 +263,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   }
 
   function onQueryChange(value: string) {
+    clearTimeout(birthTimer.current);
     setQuery(value);
     lastSemantic.current = null;
     setMeaningPending(false);
@@ -286,6 +289,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
 
   // --- Regions -------------------------------------------------------------------------
   function openRegion(id: number) {
+    clearTimeout(birthTimer.current);
     const region = model.regions[id];
     if (!region) return;
     brain.current?.select(null);
@@ -325,7 +329,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
       id: result.node.id,
       suggestions,
     });
-    setTimeout(() => openNode(result.node.id), reducedMotion ? 50 : 2600);
+    birthTimer.current = setTimeout(() => openNode(result.node.id, { auto: true }), reducedMotion ? 50 : 2600);
   }
 
   // --- Edit and delete without leaving the brain ---------------------------------------
@@ -339,31 +343,40 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
     showToast({ text: "Updated. Its connections were refreshed." });
   }
 
-  // The neuron goes immediately; the log is only deleted if you don't undo.
+  // Deleted at once (soft: purged after a week), so it sticks even if the app
+  // is closed; Undo restores it in the brain and the database.
   function deleteThought(id: string) {
+    if (pendingTags.current?.id === id) {
+      clearTimeout(pendingTags.current.timer);
+      pendingTags.current = null;
+    }
     const removed: RemovedThought | null | undefined = brain.current?.removeThought(id);
     if (!removed) return;
     closeSheet();
     if (brain.current) setModel({ ...brain.current.getModel() });
-    let undone = false;
-    const timer = setTimeout(() => {
-      if (!undone) deleteLogInPlace(id);
-    }, 5000);
+    const saved = deleteLogInPlace(id);
+    saved.then((ok) => {
+      if (!ok) showToast({ text: "Couldn't delete that. Check your connection." });
+    });
     showToast(
       {
         text: "Thought deleted.",
         action: {
           label: "Undo",
-          run: () => {
-            undone = true;
-            clearTimeout(timer);
+          run: async () => {
+            await saved;
+            const ok = await restoreLog(id);
+            if (!ok) {
+              showToast({ text: "Couldn't undo that one." }, 3000);
+              return;
+            }
             brain.current?.restoreThought(removed);
             if (brain.current) setModel({ ...brain.current.getModel() });
             showToast({ text: "Restored." }, 2000);
           },
         },
       },
-      5000,
+      6000,
     );
   }
 
@@ -484,7 +497,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
 
         {model.regions.length > 0 && (
           <nav aria-label="Regions" className="pointer-events-auto -mx-3 flex gap-2 overflow-x-auto px-3 pb-1 [scrollbar-width:none]">
-            {model.regions.map((r) => (
+            {model.regions.filter((r) => r.members.length > 0).map((r) => (
               <button
                 key={r.id}
                 onClick={() => openRegion(r.id)}
