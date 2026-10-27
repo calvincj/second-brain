@@ -81,11 +81,11 @@ export async function getRelatedLogs(id: string): Promise<LogWithImage[]> {
 export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[] }> {
   const supabase = await createClient();
   const [logs, neighbors] = await Promise.all([
-    fetchAll<{ id: string; caption: string; tags: string[]; x: number | null; y: number | null; embedding_model: string | null }>(
+    fetchAll<{ id: string; caption: string; tags: string[]; x: number | null; y: number | null; z: number | null; embedding_model: string | null }>(
       (from, to) =>
         supabase
           .from("logs")
-          .select("id, caption, tags, x, y, embedding_model")
+          .select("id, caption, tags, x, y, z, embedding_model")
           .order("created_at")
           .order("id")
           .range(from, to),
@@ -105,10 +105,12 @@ export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]
   };
 }
 
-// Search returning only ordered ids (the map already has the nodes).
-export async function searchLogIds(query: string): Promise<string[]> {
+// Search returning only ordered ids (the brain already has the nodes).
+// semantic=false skips the embedding call: instant keyword-only matching for
+// live as-you-type previews (Voyage's free tier allows 3 requests/minute).
+export async function searchLogIds(query: string, semantic = true): Promise<string[]> {
   const supabase = await createClient();
-  const embedding = await embedQuery(query);
+  const embedding = semantic ? await embedQuery(query) : null;
   const { data, error } = await supabase.rpc("hybrid_search", {
     query_text: query,
     query_embedding: embedding ? JSON.stringify(embedding) : null,
@@ -125,15 +127,13 @@ export async function getTagCounts(): Promise<{ tag: string; n: number }[]> {
   return data as { tag: string; n: number }[];
 }
 
-// A random log for the "Rediscover" card, preferring ones older than a day.
-export async function getRandomLog(excludeId: string | null = null): Promise<LogWithImage | null> {
+// A new log's own neighbour list, so the brain can wire it up immediately.
+export async function getNeighbors(id: string): Promise<MapEdge[]> {
   const supabase = await createClient();
   const { data, error } = await supabase
-    .rpc("random_logs", { n: 1, exclude_id: excludeId })
-    .select(LOG_COLUMNS);
+    .from("log_neighbors")
+    .select("log_id, neighbor_id, similarity")
+    .eq("log_id", id);
   if (error) throw error;
-  const rows = data as unknown as Log[];
-  if (!rows.length) return null;
-  const [log] = await attachImageUrls(supabase, rows);
-  return log;
+  return data.map((n) => ({ source: n.log_id, target: n.neighbor_id, similarity: n.similarity }));
 }

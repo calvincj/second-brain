@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
+import { BackLink } from "@/components/BackLink";
 import { LogActions } from "@/components/LogActions";
 import { LogCard } from "@/components/LogCard";
 import { ListSkeleton } from "@/components/Skeletons";
@@ -11,9 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 export default function LogPage({ params }: PageProps<"/log/[id]">) {
   return (
     <main className="mx-auto max-w-2xl px-4 pb-16 pt-[max(1rem,env(safe-area-inset-top))]">
-      <Link href="/" className="-ml-2 inline-flex h-11 items-center rounded-lg px-2 text-sm text-muted hover:bg-surface-2">
-        ← Back
-      </Link>
+      <BackLink className="-ml-2 inline-flex h-11 items-center rounded-lg px-2 text-sm text-muted hover:bg-surface-2" />
       <Suspense fallback={<ListSkeleton rows={2} />}>
         <LogDetail params={params} />
       </Suspense>
@@ -40,7 +39,7 @@ async function LogDetail({ params }: Pick<PageProps<"/log/[id]">, "params">) {
             {log.tags.map((tag) => (
               <Link
                 key={tag}
-                href={`/?q=${encodeURIComponent(tag)}`}
+                href={`/list?tag=${encodeURIComponent(tag)}`}
                 className="rounded-full bg-accent-soft px-2.5 py-1 text-xs text-accent"
               >
                 {tag}

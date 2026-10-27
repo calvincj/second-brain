@@ -9,7 +9,7 @@ export function TagChips({ tags, active }: { tags: { tag: string; n: number }[];
         return (
           <Link
             key={tag}
-            href={on ? "/" : `/?tag=${encodeURIComponent(tag)}`}
+            href={on ? "/list" : `/list?tag=${encodeURIComponent(tag)}`}
             aria-current={on ? "true" : undefined}
             className={`flex h-9 shrink-0 items-center gap-1 rounded-full border px-3 text-sm ${
               on ? "border-accent bg-accent text-white" : "border-border bg-surface text-muted hover:border-accent"

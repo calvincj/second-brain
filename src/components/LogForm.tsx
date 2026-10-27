@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
-import { createLog, updateLog, type LogInput } from "@/app/actions";
+import { createLog, updateLog, type ActionResult, type LogInput } from "@/app/actions";
 import { createClient } from "@/lib/supabase/client";
 import { resizeImage } from "@/lib/image";
 import { IMAGE_BUCKET } from "@/lib/types";
@@ -13,7 +13,11 @@ type Props = {
   // Present when editing an existing log.
   logId?: string;
   initial?: { caption: string; tags: string[]; sourceUrl: string; imagePath: string | null; imageUrl: string | null };
+  // New logs only: start with this caption instead of any saved draft.
+  prefill?: string;
+  autoFocus?: boolean;
   onDone?: () => void;
+  onSaved?: (result: Extract<ActionResult, { ok: true }>) => void;
 };
 
 function readDraft(): Partial<LogInput> {
@@ -24,7 +28,7 @@ function readDraft(): Partial<LogInput> {
   }
 }
 
-export function LogForm({ userId, logId, initial, onDone }: Props) {
+export function LogForm({ userId, logId, initial, prefill, autoFocus, onDone, onSaved }: Props) {
   const isEdit = !!logId;
   const [caption, setCaption] = useState(initial?.caption ?? "");
   const [tags, setTags] = useState(initial?.tags.join(", ") ?? "");
@@ -44,12 +48,13 @@ export function LogForm({ userId, logId, initial, onDone }: Props) {
     if (isEdit) return;
     const draft = readDraft();
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (draft.caption) setCaption(draft.caption);
+    if (prefill) setCaption(prefill);
+    else if (draft.caption) setCaption(draft.caption);
     if (draft.tags) setTags(draft.tags);
     if (draft.sourceUrl) setSourceUrl(draft.sourceUrl);
     if (draft.tags || draft.sourceUrl) setShowExtras(true);
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [isEdit]);
+  }, [isEdit, prefill]);
 
   // Autosave the draft so a flaky connection never loses typing.
   useEffect(() => {
@@ -123,6 +128,7 @@ export function LogForm({ userId, logId, initial, onDone }: Props) {
           kind: "ok",
           text: result.embedded ? "Saved." : "Saved. It'll be linked to related logs shortly.",
         });
+        onSaved?.(result);
         onDone?.();
       } catch (err) {
         setMessage({ kind: "error", text: err instanceof Error ? err.message : "Something went wrong." });
@@ -140,6 +146,7 @@ export function LogForm({ userId, logId, initial, onDone }: Props) {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(e);
         }}
         placeholder="What did you learn?"
+        autoFocus={autoFocus}
         rows={2}
         maxLength={1000}
         className="w-full resize-none bg-transparent px-1 py-1 outline-none placeholder:text-muted"
@@ -213,7 +220,7 @@ export function LogForm({ userId, logId, initial, onDone }: Props) {
         <button
           type="submit"
           disabled={pending}
-          className="h-11 rounded-lg bg-accent px-5 text-sm font-medium text-white disabled:opacity-60"
+          className="h-11 rounded-lg bg-accent px-5 text-sm font-medium text-on-accent disabled:opacity-60"
         >
           {pending ? "Saving…" : isEdit ? "Save" : "Log it"}
         </button>

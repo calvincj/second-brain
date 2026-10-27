@@ -1,13 +1,13 @@
 # 🧠 2nd Brain
 
 Log facts, stats and phenomena from laptop or phone. Find them by term or by idea.
-See [PLAN.md](PLAN.md) for the full design. Built so far: **Phase 1** (capture, search, related logs), **Phase 2** (the brain map at `/map`) and most of **Phase 3** (Rediscover card, tag filter, link titles).
+See [PLAN.md](PLAN.md) for the full design. The home screen is a **3D brain**: thoughts are glowing neurons grouped into named regions; searching makes matching neurons fire and the signal spread along connections; logging a thought gives birth to a new neuron that wires itself in. A plain list lives at `/list`.
 
 ## Setup
 
 ### 1. Supabase
 1. Create a project at [supabase.com](https://supabase.com), region **West US (North California)**.
-2. **SQL Editor** → paste and run each file in [`supabase/migrations/`](supabase/migrations/) in order: `0001_init.sql`, `0002_brain_map.sql`, `0003_tuning_and_phase3.sql`. (Already ran some? Just run the ones you haven't, in order.)
+2. **SQL Editor** → paste and run each file in [`supabase/migrations/`](supabase/migrations/) in order: `0001_init.sql` → `0004_brain_3d.sql`. (Already ran some? Just run the ones you haven't, in order.)
 3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up". Leave the **Email** provider itself **enabled**.
 4. **Authentication → Users → Add user → Create new user**: your email + a strong password, with **Auto Confirm User** checked. That's your login (no emails are ever sent, so no SMTP setup is needed).
 5. **Project Settings → API Keys**: copy the Project URL, **publishable** key and **secret** key.
@@ -37,7 +37,7 @@ development, a crude offline mock embedding is used so everything still works.
 Open the deployed URL in **Safari** → Share → **Add to Home Screen** → open the app from the icon and sign in **there** (the home-screen app has its own storage, separate from Safari). Save the password to Keychain when iOS offers.
 
 ## Tests
-End-to-end smoke test (38 checks: login, logging, search, tags, Rediscover, edit/delete, export, cron, map):
+End-to-end smoke test (40 checks: login, logging from the brain and the list, search, tags, edit/delete, export, cron, 3D brain search/regions/neuron birth, layout persistence):
 ```bash
 npx supabase start && npx supabase db reset   # local Supabase only; never touches your real project
 npm run test:e2e                               # screenshots land in e2e/out/
@@ -50,12 +50,12 @@ npm run test:e2e                               # screenshots land in e2e/out/
 ```
 src/proxy.ts                 session refresh + login gate
 src/app/actions.ts           create / update / delete / retry-embed
-src/app/page.tsx             quick-add, search, recent list
+src/app/page.tsx             the 3D brain (home)
+src/app/list/page.tsx        quick-add, search, tags, recent list
 src/app/log/[id]/page.tsx    detail, edit, related logs
 src/app/login/page.tsx       email + password sign-in
-src/app/map/page.tsx         brain map (Phase 2)
-src/components/map/          Sigma.js map: layout, highlighting, search-to-zoom
-src/lib/graph.ts             builds the graph: edge selection, placement, clusters
+src/components/brain/        3D brain: renderer (three.js) + UI (search bar, regions, cards)
+src/lib/brain-model.ts       edges, regions + names, spreading activation
 src/app/api/cron             keep-alive, embedding backfill, neighbour rebuild
 src/app/api/export           JSON / Markdown export
 src/lib/embeddings.ts        Voyage client

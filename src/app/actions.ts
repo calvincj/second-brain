@@ -7,7 +7,8 @@ import { createClient } from "@/lib/supabase/server";
 import { embedLogs } from "@/lib/embeddings";
 import { normalizeUrl, parseTags } from "@/lib/format";
 import { fetchLinkTitle } from "@/lib/link-title";
-import { getRandomLog, searchLogIds, type LogWithImage } from "@/lib/queries";
+import { getLog, getNeighbors, searchLogIds, type LogWithImage } from "@/lib/queries";
+import type { MapEdge, MapNode } from "@/lib/types";
 import { IMAGE_BUCKET } from "@/lib/types";
 
 export type LogInput = {
@@ -17,7 +18,16 @@ export type LogInput = {
   imagePath: string | null;
 };
 
-export type ActionResult = { ok: true; id: string; embedded: boolean } | { ok: false; error: string };
+export type ActionResult =
+  | {
+      ok: true;
+      id: string;
+      embedded: boolean;
+      // For the brain: the saved thought and what it connected to.
+      node: MapNode;
+      neighbors: MapEdge[];
+    }
+  | { ok: false; error: string };
 
 async function requireUser() {
   const supabase = await createClient();
@@ -74,6 +84,10 @@ function fetchTitleLater(
   });
 }
 
+function nodeFrom(id: string, values: { caption: string; tags: string[] }, embedded: boolean): MapNode {
+  return { id, caption: values.caption, tags: values.tags, x: null, y: null, z: null, embedded };
+}
+
 export async function createLog(input: LogInput): Promise<ActionResult> {
   const { supabase, user } = await requireUser();
   const values = validate(input, user.id);
@@ -85,7 +99,14 @@ export async function createLog(input: LogInput): Promise<ActionResult> {
   const embedded = await tryEmbed(supabase, { id: data.id, ...values });
   fetchTitleLater(supabase, data.id, values.source_url);
   revalidatePath("/");
-  return { ok: true, id: data.id, embedded };
+  revalidatePath("/list");
+  return {
+    ok: true,
+    id: data.id,
+    embedded,
+    node: nodeFrom(data.id, values, embedded),
+    neighbors: embedded ? await getNeighbors(data.id) : [],
+  };
 }
 
 export async function updateLog(id: string, input: LogInput): Promise<ActionResult> {
@@ -122,8 +143,15 @@ export async function updateLog(id: string, input: LogInput): Promise<ActionResu
   const embedded = await tryEmbed(supabase, { id, ...values });
   if (urlChanged) fetchTitleLater(supabase, id, values.source_url);
   revalidatePath("/");
+  revalidatePath("/list");
   revalidatePath(`/log/${id}`);
-  return { ok: true, id, embedded };
+  return {
+    ok: true,
+    id,
+    embedded,
+    node: nodeFrom(id, values, embedded),
+    neighbors: embedded ? await getNeighbors(id) : [],
+  };
 }
 
 export async function retryEmbedding(id: string): Promise<boolean> {
@@ -132,6 +160,7 @@ export async function retryEmbedding(id: string): Promise<boolean> {
   if (!data) return false;
   const embedded = await tryEmbed(supabase, data);
   revalidatePath("/");
+  revalidatePath("/list");
   revalidatePath(`/log/${id}`);
   return embedded;
 }
@@ -144,7 +173,8 @@ export async function deleteLog(id: string) {
     await supabase.storage.from(IMAGE_BUCKET).remove([data.image_path]);
   }
   revalidatePath("/");
-  redirect("/");
+  revalidatePath("/list");
+  redirect("/list");
 }
 
 export async function signOut() {
@@ -154,7 +184,7 @@ export async function signOut() {
 }
 
 // Map: persist a layout snapshot. Chunked to stay under the action body limit.
-export async function savePositions(positions: { id: string; x: number; y: number }[]) {
+export async function savePositions(positions: { id: string; x: number; y: number; z: number }[]) {
   const { supabase } = await requireUser();
   for (let i = 0; i < positions.length; i += 2000) {
     const { error } = await supabase.rpc("save_positions", { positions: positions.slice(i, i + 2000) });
@@ -162,13 +192,13 @@ export async function savePositions(positions: { id: string; x: number; y: numbe
   }
 }
 
-export async function searchMap(query: string): Promise<string[]> {
+export async function searchMap(query: string, semantic = true): Promise<string[]> {
   await requireUser();
   const q = query.trim();
-  return q ? searchLogIds(q) : [];
+  return q ? searchLogIds(q, semantic) : [];
 }
 
-export async function rediscover(excludeId: string | null): Promise<LogWithImage | null> {
+export async function getLogDetail(id: string): Promise<LogWithImage | null> {
   await requireUser();
-  return getRandomLog(excludeId);
+  return getLog(id);
 }

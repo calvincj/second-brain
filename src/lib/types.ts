@@ -22,6 +22,7 @@ export type MapNode = {
   tags: string[];
   x: number | null;
   y: number | null;
+  z: number | null;
   embedded: boolean;
 };
 

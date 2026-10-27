@@ -9,6 +9,7 @@
   --muted: #6b6b7b;
   --accent: #6d4aff;
   --accent-soft: #ede8ff;
+  --on-accent: #ffffff;
   --danger: #d6334b;
 }
 
@@ -35,6 +36,7 @@
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
   --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
 }
@@ -50,4 +52,39 @@ input,
 textarea,
 select {
   font-size: 16px;
+}
+
+/* The brain is always dark: glows wash out on white. */
+.brain-scope {
+  --bg: #04050c;
+  --surface: rgba(16, 18, 34, 0.86);
+  --surface-2: rgba(36, 40, 70, 0.7);
+  --border: rgba(140, 150, 220, 0.18);
+  --text: #eef0ff;
+  --muted: #9aa0c8;
+  --accent: #5ee6d0;
+  --accent-soft: rgba(94, 230, 208, 0.14);
+  --on-accent: #03150f;
+  --danger: #ff7a90;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .brain-fade-in {
+    animation: brain-fade-in 0.35s ease-out both;
+  }
+  .brain-sheet-in {
+    animation: brain-sheet-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  }
+}
+
+@keyframes brain-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes brain-sheet-in {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
 }

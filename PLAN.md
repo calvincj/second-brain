@@ -73,8 +73,11 @@ Supabase project (pgvector, RLS, bucket, signups off) · Next.js scaffold · pas
 **Phase 2: Brain map**
 `log_neighbors` · Sigma.js view · ForceAtlas2 worker · auto re-layout + bulk save · interaction-lit edges · search-to-zoom · mobile tuning. ✅ Built (Louvain cluster colouring pulled forward from Phase 3).
 
-**Phase 3: Optional polish** (built: Rediscover card, tag filter chips, background link titles with SSRF guards; remaining items below are still open)
+**Phase 3: Optional polish** (built: tag filter chips, background link titles with SSRF guards; remaining items below are still open)
 Optional Claude cluster names · vision caption suggestions for screenshots · auto-fetched link titles (with SSRF guards) · filters · random-fact resurfacing.
+
+**Phase 4: 3D brain (built)**
+Home screen is a full-3D, bioluminescent brain (3d-force-graph / three.js): neurons with additive glow (bloom on desktop), regions = seeded Louvain communities shown as coloured nebulae with unique auto names, region cohesion + gentle centre gravity so regions pack like lobes. Search = live keyword preview while typing, semantic on pause/Enter; hits ignite and activation spreads hop-by-hop as travelling pulses, camera frames everything lit. Tap a neuron → it fires, card with connected thoughts + breadcrumb trail. Logging gives birth to a neuron that flies to its region and wires itself in ("Connected to: …"). Ambient twinkle, sparks, slow auto-rotate (off with Reduce Motion). Positions persisted in 3D (x,y,z). Rediscover removed; list moved to `/list`.
 
 ## Tuning notes (measured on real voyage-3.5-lite embeddings, 42 labelled facts)
 - Any two short facts score 0.56–0.77 cosine, even unrelated ones (unrelated avg 0.62, related 0.71); queries score 0.40–0.56. Fixed thresholds don't work.
