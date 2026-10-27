@@ -251,7 +251,7 @@ try {
   await page.screenshot({ path: OUT + "02-brain-search.png" });
   await hitChips.first().click();
   await page.waitForSelector("text=Connected thoughts", { timeout: 5000 }).catch(() => {});
-  check("tapping a hit opens the thought card", await page.locator("text=Open, edit or delete").isVisible());
+  check("tapping a hit opens the thought card", await page.locator("aside >> text=Full page").isVisible());
   await page.waitForTimeout(1200);
   await page.screenshot({ path: OUT + "03-brain-thought.png" });
   await page.locator('aside button[aria-label="Close"]').click();
@@ -277,10 +277,9 @@ try {
   await page.locator('aside button[aria-label="Close"]').click();
 
   // A new thought is born in the brain.
-  await page.fill(brainInput, "Octopuses can taste with their suckers");
+  // No tags on purpose: its neighbours' shared tags should be suggested.
+  await page.fill(brainInput, "Octopus arms contain taste receptors in their suckers");
   await page.click('button[aria-label="Log a new thought"]');
-  await page.click("text=+ Link & tags");
-  await page.fill('input[placeholder^="Tags"]', "biology, ocean");
   await page.click('button:has-text("Log it")');
   const toast = await page.waitForSelector('[role="status"]', { timeout: 10000 });
   const toastText = await toast.innerText();
@@ -296,14 +295,46 @@ try {
   check("thought count goes up without reload", (await page.locator("p:has-text('thoughts ·')").innerText()).startsWith(String(COUNT + 1)));
   await page.click('button[aria-label="Menu"]');
   await page.waitForTimeout(3500);
-  check("new thought's card opens after it settles", await page.locator("aside >> text=taste with their suckers").isVisible());
+  check("new thought's card opens after it settles", await page.locator("aside >> text=taste receptors in their suckers").isVisible());
   await page.screenshot({ path: OUT + "05-brain-birth.png" });
   if (suggestedTag) {
-    const born = await (await admin(`/rest/v1/logs?select=tags&caption=eq.${encodeURIComponent("Octopuses can taste with their suckers")}`)).json();
+    const born = await (await admin(`/rest/v1/logs?select=tags&caption=eq.${encodeURIComponent("Octopus arms contain taste receptors in their suckers")}`)).json();
     check("tapping a suggestion adds the tag", born[0]?.tags.includes(suggestedTag), JSON.stringify(born[0]?.tags));
   }
   const newPlaced = await (await admin("/rest/v1/logs?select=id&z=not.is.null")).json();
   check("new thought's position saved", newPlaced.length === COUNT + 1, `${newPlaced.length}`);
+
+  // Edit in place: the card is still open on the newborn thought.
+  await page.locator('aside button:has-text("Edit")').click();
+  await page.fill("aside textarea", "Octopus arms contain taste receptors in their suckers, and edits work");
+  await page.locator('aside button:has-text("Save")').click();
+  await page.waitForSelector("aside >> text=Edit thought", { state: "detached", timeout: 15000 });
+  await page.waitForSelector("aside >> text=edits work", { timeout: 15000 });
+  check("edit in the brain updates the card", true);
+  const edited = await (await admin(`/rest/v1/logs?select=id&caption=ilike.${encodeURIComponent("*edits work*")}`)).json();
+  check("edit saved to the database", edited.length === 1);
+  const editedTags = await (await admin(`/rest/v1/logs?select=tags&caption=ilike.${encodeURIComponent("*edits work*")}`)).json();
+  check("editing keeps a tag accepted moments earlier", !suggestedTag || editedTags[0]?.tags.includes(suggestedTag), JSON.stringify(editedTags[0]?.tags));
+
+  // Delete with undo: the neuron goes, Undo brings it back, nothing is deleted.
+  await page.locator('aside button:has-text("Delete")').click();
+  await page.waitForSelector('[role="status"] >> text=Thought deleted', { timeout: 5000 });
+  await page.click('button[aria-label="Menu"]');
+  const afterDelete = (await page.locator("p:has-text('thoughts ·')").innerText()).split(" ")[0];
+  await page.click('button[aria-label="Menu"]');
+  await page.locator('[role="status"] button:has-text("Undo")').click();
+  await page.waitForTimeout(6000);
+  const stillThere = await (await admin(`/rest/v1/logs?select=id&id=eq.${edited[0].id}`)).json();
+  check("delete hides the neuron, undo restores it", afterDelete === String(COUNT) && stillThere.length === 1, `count after delete ${afterDelete}`);
+
+  // Delete for real.
+  await page.locator('nav[aria-label="Thoughts by region"] button:has-text("edits work")').first().evaluate((b) => b.click());
+  await page.waitForSelector('aside button:has-text("Delete")');
+  await page.locator('aside button:has-text("Delete")').click();
+  await page.waitForTimeout(6500);
+  const gone = await (await admin(`/rest/v1/logs?select=id&id=eq.${edited[0].id}`)).json();
+  check("delete without undo removes it", gone.length === 0);
+  check("hidden accessible list mirrors the brain", (await page.locator('nav[aria-label="Thoughts by region"] li').count()) >= 3);
 
   // Reopening keeps the layout stable.
   const pos1 = await (await admin("/rest/v1/logs?select=id,x,y,z&order=id")).json();

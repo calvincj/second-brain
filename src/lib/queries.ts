@@ -151,7 +151,8 @@ export async function getNeighbors(id: string): Promise<MapEdge[]> {
   const { data, error } = await supabase
     .from("log_neighbors")
     .select("log_id, neighbor_id, similarity")
-    .eq("log_id", id);
+    .eq("log_id", id)
+    .order("similarity", { ascending: false });
   if (error) throw error;
   return data.map((n) => ({ source: n.log_id, target: n.neighbor_id, similarity: n.similarity }));
 }

@@ -131,6 +131,7 @@ export async function updateLog(id: string, input: LogInput): Promise<ActionResu
       embedding_model: null,
       x: null,
       y: null,
+      z: null,
       ...(urlChanged ? { source_title: null } : {}),
     })
     .eq("id", id);
@@ -165,16 +166,26 @@ export async function retryEmbedding(id: string): Promise<boolean> {
   return embedded;
 }
 
-export async function deleteLog(id: string) {
+async function removeLog(id: string) {
   const { supabase } = await requireUser();
   const { data } = await supabase.from("logs").select("image_path").eq("id", id).single();
-  await supabase.from("logs").delete().eq("id", id);
+  const { error } = await supabase.from("logs").delete().eq("id", id);
   if (data?.image_path) {
     await supabase.storage.from(IMAGE_BUCKET).remove([data.image_path]);
   }
   revalidatePath("/");
   revalidatePath("/list");
+  return !error;
+}
+
+export async function deleteLog(id: string) {
+  await removeLog(id);
   redirect("/list");
+}
+
+// From the brain: stays on the page (the brain already removed the neuron).
+export async function deleteLogInPlace(id: string): Promise<boolean> {
+  return removeLog(id);
 }
 
 export async function signOut() {

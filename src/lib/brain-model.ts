@@ -106,7 +106,10 @@ export function regionNameCandidates(members: MapNode[], all: MapNode[]): string
     .map((x) => x.w);
 
   const anyTags = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t);
-  return [...new Set([...tags, ...distinctive, ...anyTags])].map(titleCase);
+  // When no single tag covers most of the region, a pair describes it better.
+  const pairs: string[] = [];
+  if (tags.length >= 2 && (tagCounts.get(tags[0]) ?? 0) < members.length * 0.6) pairs.push(`${tags[0]} & ${tags[1]}`);
+  return [...new Set([...pairs, ...tags, ...distinctive, ...anyTags])].map(titleCase);
 }
 
 // Unique names across regions (bigger regions pick first).
@@ -156,7 +159,36 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
     groups.set(community[n.id], list);
   }
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const sortedGroups = [...groups.values()].filter((m) => m.length >= 2).sort((a, b) => b.length - a.length);
+  // Real regions have at least 3 thoughts (2 with a tiny brain). Connected
+  // thoughts left outside one join the region of their strongest neighbour,
+  // so nothing that clearly belongs somewhere shows up as "Unsorted".
+  const minSize = nodes.length < 12 ? 2 : 3;
+  const regionGroups = [...groups.values()].filter((m) => m.length >= minSize);
+  const groupOf = new Map<string, string[]>();
+  regionGroups.forEach((g) => g.forEach((id) => groupOf.set(id, g)));
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (const n of nodes) {
+      if (groupOf.has(n.id) || graph.degree(n.id) === 0) continue;
+      let best: string[] | undefined;
+      let bestWeight = -1;
+      graph.forEachEdge(n.id, (_, a, s, t) => {
+        const other = s === n.id ? t : s;
+        const g = groupOf.get(other);
+        if (g && (a.weight as number) > bestWeight) {
+          best = g;
+          bestWeight = a.weight as number;
+        }
+      });
+      if (best) {
+        best.push(n.id);
+        groupOf.set(n.id, best);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const sortedGroups = regionGroups.sort((a, b) => b.length - a.length);
   const names = nameRegions(sortedGroups, byId, nodes);
   const regions: Region[] = sortedGroups.map((members, i) => ({
     id: i,
