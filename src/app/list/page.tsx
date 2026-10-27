@@ -6,6 +6,7 @@ import { LogForm } from "@/components/LogForm";
 import { SearchBar } from "@/components/SearchBar";
 import { FormSkeleton, ListSkeleton } from "@/components/Skeletons";
 import { TagChips } from "@/components/TagChips";
+import { UndoDelete } from "@/components/UndoDelete";
 import { getRecentLogs, getTagCounts, searchLogs } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 
@@ -63,6 +64,7 @@ async function Results({ searchParams }: Pick<PageProps<"/list">, "searchParams"
   const params = await searchParams;
   const query = param(params.q);
   const tag = param(params.tag);
+  const deleted = param(params.deleted);
 
   const [logs, tags] = await Promise.all([
     query ? searchLogs(query) : getRecentLogs({ tag: tag || undefined }),
@@ -77,6 +79,7 @@ async function Results({ searchParams }: Pick<PageProps<"/list">, "searchParams"
 
   return (
     <div className="space-y-3">
+      {deleted && <UndoDelete key={deleted} id={deleted} />}
       {!query && <TagChips tags={tags} active={tag || null} />}
       <div className="space-y-2">
         <p className="px-1 text-xs uppercase tracking-wide text-muted">{heading}</p>

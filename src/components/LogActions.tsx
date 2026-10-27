@@ -49,9 +49,8 @@ export function LogActions({ log, userId }: { log: LogWithImage; userId: string 
       <div className="flex-1" />
       <button
         disabled={pending}
-        onClick={() => {
-          if (confirm("Delete this log?")) startTransition(() => deleteLog(log.id));
-        }}
+        // No confirm dialog: the list offers Undo (deletes are soft).
+        onClick={() => startTransition(() => deleteLog(log.id))}
         className="h-11 rounded-lg px-4 text-sm text-danger hover:bg-surface-2 disabled:opacity-60"
       >
         Delete

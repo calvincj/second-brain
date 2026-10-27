@@ -36,6 +36,8 @@ export type BrainHandle = {
   getModel: () => BrainModel;
   // Shift the picture up by this fraction of the height (to clear a bottom sheet).
   setViewShift: (fraction: number) => void;
+  // Screen bands (px) covered by UI, where labels must not be drawn.
+  setOcclusion: (top: number, bottom: number) => void;
 };
 
 export type RemovedThought = { node: BrainNode; links: BrainLink[]; region: number | null };
@@ -68,6 +70,17 @@ type Visual = {
 type Pulse = { sprite: THREE.Sprite; from: BrainNode; to: BrainNode; start: number; duration: number; ambient: boolean };
 
 const BACKGROUND = "#04050c";
+// Bump when the forces change, so existing brains re-settle once with them.
+const LAYOUT_VERSION = "4";
+const LAYOUT_KEY = "brain:layout-version";
+
+function readLayoutVersion() {
+  try {
+    return localStorage.getItem(LAYOUT_KEY);
+  } catch {
+    return LAYOUT_VERSION;
+  }
+}
 const DIM_LINK = "rgba(110,120,180,0.22)";
 
 // Soft radial glow used for neurons, pulses and region nebulae.
@@ -116,6 +129,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
   const modelRef = useRef(model);
   const nodeIndex = useRef(new Map<string, BrainNode>());
   const viewShift = useRef({ current: 0, target: 0 });
+  const occlusion = useRef({ top: 110, bottom: 90 });
   const lastInteraction = useRef(0);
   const paused = useRef(false);
   const wakeRef = useRef<() => void>(() => {});
@@ -145,7 +159,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       .onEngineStop(() => {
         if (fitOnStop.current) {
           fitOnStop.current = false;
-          graph.zoomToFit(reducedMotion ? 0 : 1200, isMobile ? 30 : 60);
+          frameThoughts(null, 1200);
         }
         const settle = settleRef.current;
         const nodes = graph.graphData().nodes;
@@ -155,6 +169,11 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         });
         if (!settle.pending) return;
         settle.pending = false;
+        try {
+          localStorage.setItem(LAYOUT_KEY, LAYOUT_VERSION);
+        } catch {
+          // Storage blocked: it just re-settles again next time.
+        }
         callbacks.current.onPositionsSettled(
           nodes
             .filter((n) => n.embedded)
@@ -187,8 +206,15 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     // 60% further apart, link lengths 39% and neighbour spacing 52% more even):
     // similar thoughts sit close; regions hold together like lobes and keep a
     // clear gap from each other; neurons never overlap.
-    const linkForce = graph.d3Force("link") as unknown as { distance: (fn: (l: BrainLink) => number) => void } | undefined;
-    linkForce?.distance((l) => 22 + (1 - l.weight) * 18);
+    const linkForce = graph.d3Force("link") as unknown as
+      | { distance: (fn: (l: BrainLink) => number) => { strength: (fn: (l: BrainLink) => number) => void } }
+      | undefined;
+    // Bridges between regions are long and weak, so they don't drag lobes
+    // into each other (d3's default strength made them pull as hard as
+    // links inside a region).
+    linkForce
+      ?.distance((l) => (sameRegion(l) ? 22 + (1 - l.weight) * 18 : 90))
+      .strength((l) => (sameRegion(l) ? 1 / Math.max(1, Math.min(degreeOf(l.source), degreeOf(l.target))) : 0.04));
     const charge = graph.d3Force("charge") as unknown as
       | { strength: (n: number) => { distanceMax: (n: number) => void } }
       | undefined;
@@ -290,7 +316,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       for (const [id, v] of visuals.current) {
         v.level += (v.target - v.level) * 0.1;
         v.flash *= 0.92;
-        const twinkle = reducedMotion ? 0 : Math.sin(t * 0.0012 * v.speed + v.phase) * 0.12;
+        const twinkle = reducedMotion ? 0 : Math.sin(t * 0.0012 * v.speed + v.phase) * 0.05;
         const inFocus = (focus?.has(id) ?? false) || v.level > 0.05;
         const dimmed = anyActive && !inFocus;
         const glowOpacity = dimmed ? 0.1 : 0.5 + twinkle + v.level * 0.5 + v.flash;
@@ -305,14 +331,23 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
           if (showLabel) {
             screenScale(v.label, v.labelBase, isMobile ? 17 : 19);
             v.label.position.set(0, -(v.baseScale * 0.55 + 3), 0);
-            const priority = id === selected.current ? 3 : id === hovered.current ? 2 : 1 + v.level;
+            // Rank by the target (not the easing value) and favour labels
+            // already showing, so near-equal labels don't swap and flicker.
+            const priority =
+              (id === selected.current ? 3 : id === hovered.current ? 2 : 1 + v.target) + (v.label.visible ? 0.3 : 0);
             labelCandidates.push({ v, priority });
           }
         }
       }
 
       // Never let labels pile up: keep the most important, hide any overlap.
-      const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
+      const W = graph.width();
+      const H = graph.height();
+      // UI bands (chips at the top, bar/panels at the bottom) count as taken.
+      const placed: { x0: number; y0: number; x1: number; y1: number }[] = [
+        { x0: 0, y0: 0, x1: W, y1: occlusion.current.top },
+        { x0: 0, y0: H - occlusion.current.bottom, x1: W, y1: H },
+      ];
       const labelPx = isMobile ? 17 : 19;
       labelCandidates.sort((a, b) => b.priority - a.priority);
       for (const { v } of labelCandidates) {
@@ -321,7 +356,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         const p = graph.graph2ScreenCoords(w.x, w.y, w.z);
         const width = (v.labelBase[0] / v.labelBase[1]) * labelPx;
         const rect = { x0: p.x - width / 2, y0: p.y - labelPx / 2, x1: p.x + width / 2, y1: p.y + labelPx / 2 };
-        const clash = placed.some((o) => rect.x0 < o.x1 && rect.x1 > o.x0 && rect.y0 < o.y1 && rect.y1 > o.y0);
+        const offscreen = rect.x0 < 4 || rect.x1 > W - 4;
+        const clash = offscreen || placed.some((o) => rect.x0 < o.x1 && rect.x1 > o.x0 && rect.y0 < o.y1 && rect.y1 > o.y0);
         label.visible = !clash;
         if (!clash) placed.push(rect);
       }
@@ -372,15 +408,19 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         const c = members.reduce((acc, n) => acc.add(pos(n)), new THREE.Vector3()).divideScalar(members.length);
         const spread = Math.sqrt(members.reduce((s, n) => s + pos(n).distanceToSquared(c), 0) / members.length);
         r.nebula.position.copy(c);
-        const size = Math.max(40, spread * 3.2);
+        // Each lobe breathes slowly, in sync, so the brain feels alive.
+        const breath = reducedMotion ? 1 : 1 + Math.sin(t * 0.0009 + r.regionId * 1.7) * 0.05;
+        const size = Math.max(40, spread * 3.2) * breath;
         r.nebula.scale.set(size, size, 1);
         const regionActive = anyActive && members.some((n) => (visuals.current.get(n.id)?.level ?? 0) > 0.05 || focus?.has(n.id));
-        (r.nebula.material as THREE.SpriteMaterial).opacity = anyActive ? (regionActive ? 0.22 : 0.04) : 0.15;
-        r.label.position.set(c.x, c.y + spread * 0.9 + 6, c.z);
+        (r.nebula.material as THREE.SpriteMaterial).opacity = anyActive ? (regionActive ? 0.26 : 0.04) : isMobile ? 0.22 : 0.16;
+        // Above the region's highest neuron, never on top of one.
+        const top = Math.max(...members.map((n) => (n.y ?? 0) - c.y));
+        r.label.position.set(c.x, c.y + top + 10, c.z);
         screenScale(r.label, r.labelBase, isMobile ? 13 : 15);
         // Hide a region name that would sit under the floating top chips.
         const sp = graph.graph2ScreenCoords(r.label.position.x, r.label.position.y, r.label.position.z);
-        if (sp.y < (isMobile ? 120 : 110)) r.label.visible = false;
+        if (sp.y < occlusion.current.top + 8) r.label.visible = false;
         (r.label.material as THREE.SpriteMaterial).opacity = anyActive && !regionActive ? 0.25 : 0.9;
       }
     };
@@ -412,6 +452,16 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
   function setModel(next: BrainModel) {
     modelRef.current = next;
     nodeIndex.current = new Map(next.nodes.map((n) => [n.id, n]));
+  }
+
+  function sameRegion(l: BrainLink) {
+    const a = nodeById(idOf(l.source));
+    const b = nodeById(idOf(l.target));
+    return !!a && !!b && a.region != null && a.region === b.region;
+  }
+
+  function degreeOf(end: string | BrainNode) {
+    return nodeById(idOf(end))?.degree ?? 1;
   }
 
   function neighborsOf(id: string): string[] {
@@ -455,7 +505,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       transparent: true,
     });
     // Sized for the spread-out layout (regions sit well apart).
-    const radius = 1.3 + Math.min(1.5, Math.sqrt(node.degree) * 0.45);
+    // Phones get no bloom, so their cores are larger to read at a glance.
+    const radius = (1.3 + Math.min(1.5, Math.sqrt(node.degree) * 0.45)) * (isMobile ? 1.4 : 1);
     const core = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 12), coreMaterial);
     const glow = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -541,10 +592,14 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     let nodes: BrainNode[] = [];
     const force = (alpha: number) => {
       const k = 0.035 * alpha;
+      // On a portrait phone, pull less vertically so the brain grows tall to
+      // fill the screen instead of wide and clipped.
+      const el = container.current;
+      const ky = el && el.clientHeight > el.clientWidth * 1.2 ? k * 0.45 : k;
       for (const n of nodes) {
         if (n.fx != null) continue;
         n.vx = (n.vx ?? 0) - (n.x ?? 0) * k;
-        n.vy = (n.vy ?? 0) - (n.y ?? 0) * k;
+        n.vy = (n.vy ?? 0) - (n.y ?? 0) * ky;
         n.vz = (n.vz ?? 0) - (n.z ?? 0) * k;
       }
     };
@@ -552,8 +607,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     return force;
   }
 
-  // Pushes regions apart until there's a clear gap between them (their
-  // centres at least 1.4x their combined radii), so lobes read as distinct.
+  // Pushes regions apart until there's a clear gap between them, so lobes
+  // read as distinct.
   function regionSeparation() {
     let nodes: BrainNode[] = [];
     const force = (alpha: number) => {
@@ -573,11 +628,18 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         for (let j = i + 1; j < regions.length; j++) {
           const a = regions[i];
           const b = regions[j];
-          const v = b.c.clone().sub(a.c);
-          const d = v.length() || 1;
-          const want = (a.r + b.r) * 1.4;
+          let v = b.c.clone().sub(a.c);
+          let d = v.length();
+          // Coincident centres would never separate; pick a direction.
+          if (d < 0.5) {
+            v = new THREE.Vector3().randomDirection();
+            d = 1;
+          }
+          // RMS radius understates a region's extent, so ask for a wide gap.
+          const want = (a.r + b.r) * 1.8 + 12;
           if (d >= want) continue;
-          const push = ((want - d) / d) * 5 * alpha;
+          // Clamped, so many overlapping pairs can't add up to a jolt.
+          const push = (Math.min(want - d, 14) * 0.6 * alpha) / d;
           for (const n of a.m) {
             if (n.fx != null) continue;
             n.vx = (n.vx ?? 0) - v.x * push;
@@ -677,6 +739,27 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     refreshLinks();
   }
 
+  // Frames the given thoughts so they fit on screen from any rotation angle:
+  // fits their bounding sphere against the narrower of the vertical and
+  // horizontal fields of view (zoomToFit used only the box, so portrait
+  // phones clipped regions as the brain rotated). One thought: fly to it.
+  function frameThoughts(ids: string[] | null, ms: number) {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const nodes = (ids ? ids.map(nodeById) : modelRef.current.nodes).filter((n): n is BrainNode => !!n && n.x != null);
+    if (nodes.length === 0) return;
+    const c = nodes.reduce((acc, n) => acc.add(pos(n)), new THREE.Vector3()).divideScalar(nodes.length);
+    const r = Math.max(30, ...nodes.map((n) => pos(n).distanceTo(c))) + 20;
+    const camera = graph.camera() as THREE.PerspectiveCamera;
+    const vFov = THREE.MathUtils.degToRad(camera.fov);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * (graph.width() / graph.height()));
+    const distance = Math.max(isMobile ? 130 : 100, r / Math.sin(Math.min(vFov, hFov) / 2));
+    const dir = camera.position.clone().sub(c).normalize();
+    if (!Number.isFinite(dir.x) || dir.lengthSq() === 0) dir.set(0, 0, 1);
+    const to = c.clone().add(dir.multiplyScalar(distance));
+    graph.cameraPosition({ x: to.x, y: to.y, z: to.z }, { x: c.x, y: c.y, z: c.z }, reducedMotion ? 0 : ms);
+  }
+
   // The region most of these neighbours belong to.
   function voteRegion(neighborIds: string[]): number | null {
     const votes = new Map<number, number>();
@@ -709,6 +792,13 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     if (!graph) return;
     setModel(model);
     const nodes = model.nodes;
+    // New layout rules: let everything find its place once more.
+    const relayout = readLayoutVersion() !== LAYOUT_VERSION;
+    if (relayout) {
+      nodes.forEach((n) => {
+        n.x = n.y = n.z = undefined;
+      });
+    }
     const placed = nodes.filter((n) => n.embedded && n.x != null && n.y != null && n.z != null);
     const unplaced = nodes.filter((n) => n.embedded && (n.x == null || n.y == null || n.z == null));
     const firstLayout = placed.length === 0;
@@ -755,7 +845,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       .graphData({ nodes, links: model.links });
     buildRegions();
     refreshLinks();
-    setTimeout(() => graph.zoomToFit(firstLayout ? 1500 : 900, isMobile ? 30 : 60), firstLayout ? 2500 : 300);
+    setTimeout(() => frameThoughts(null, firstLayout ? 1500 : 900), firstLayout ? 2500 : 300);
     // buildRegions/refreshLinks only touch refs; re-run on data changes only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, isMobile]);
@@ -819,7 +909,10 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       const lit = activation.current;
       if (!graph || !lit.size) return;
       (graph.controls() as { autoRotate: boolean }).autoRotate = false;
-      graph.zoomToFit(reducedMotion ? 0 : 1200, isMobile ? 40 : 120, (n) => (lit.get(n.id)?.level ?? 0) > 0.12);
+      frameThoughts(
+        [...lit.values()].filter((a) => a.level > 0.12).map((a) => a.id),
+        1200,
+      );
     },
     flyToRegion(regionId) {
       wakeRef.current();
@@ -827,12 +920,11 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
       const region = modelRef.current.regions[regionId];
       if (!graph || !region) return;
       (graph.controls() as { autoRotate: boolean }).autoRotate = false;
-      const members = new Set(region.members);
-      graph.zoomToFit(reducedMotion ? 0 : 1200, isMobile ? 20 : 80, (n) => members.has(n.id));
+      frameThoughts(region.members, 1200);
     },
     fitAll() {
       wakeRef.current();
-      graphRef.current?.zoomToFit(reducedMotion ? 0 : 1000, isMobile ? 30 : 60);
+      frameThoughts(null, 1000);
     },
     select(id) {
       wakeRef.current();
@@ -841,6 +933,9 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     },
     getModel() {
       return modelRef.current;
+    },
+    setOcclusion(top, bottom) {
+      occlusion.current = { top, bottom };
     },
     setViewShift(fraction) {
       wakeRef.current();

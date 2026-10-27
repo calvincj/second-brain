@@ -202,9 +202,9 @@ try {
   await page.goto(APP + "/list");
   await page.locator(`${listCards}:has-text('Inflation erodes')`).filter({ visible: true }).first().click();
   await page.waitForURL(/\/log\//);
-  page.once("dialog", (d) => d.accept());
   await page.click('button:has-text("Delete")');
-  await page.waitForURL(APP + "/list", { timeout: 10000 });
+  await page.waitForURL(/\/list\?deleted=/, { timeout: 10000 });
+  check("list offers Undo after deleting from a log page", !!(await page.waitForSelector("text=Thought deleted.", { timeout: 10000 }).catch(() => null)));
   let stale = 1;
   for (let t = 0; stale && t < 50; t++) {
     stale = await page.locator(`${listCards}:has-text('Inflation erodes')`).filter({ visible: true }).count();

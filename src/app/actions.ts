@@ -195,7 +195,7 @@ export async function restoreLog(id: string): Promise<boolean> {
 
 export async function deleteLog(id: string) {
   await removeLog(id);
-  redirect("/list");
+  redirect(`/list?deleted=${encodeURIComponent(id)}`);
 }
 
 // From the brain: stays on the page (the brain already removed the neuron).

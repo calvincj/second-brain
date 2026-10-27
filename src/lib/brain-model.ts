@@ -163,8 +163,10 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
   nodes.forEach((n) => graph.addNode(n.id));
 
   // Union of both directions; keep the stronger similarity for a pair.
-  for (const e of selectEdges(nodes.length, edges)) {
-    if (!ids.has(e.source) || !ids.has(e.target)) continue;
+  // Drop edges to missing (e.g. just-deleted) thoughts first, so they can't
+  // take up a thought's few link slots.
+  const live = edges.filter((e) => ids.has(e.source) && ids.has(e.target));
+  for (const e of selectEdges(nodes.length, live)) {
     if (graph.hasEdge(e.source, e.target)) {
       const w = graph.getEdgeAttribute(e.source, e.target, "weight") as number;
       if (e.similarity > w) graph.setEdgeAttribute(e.source, e.target, "weight", e.similarity);

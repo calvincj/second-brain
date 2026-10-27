@@ -356,7 +356,11 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
     if (brain.current) setModel({ ...brain.current.getModel() });
     const saved = deleteLogInPlace(id);
     saved.then((ok) => {
-      if (!ok) showToast({ text: "Couldn't delete that. Check your connection." });
+      if (ok) return;
+      // Keep the brain honest: the thought still exists, so bring it back.
+      brain.current?.restoreThought(removed);
+      if (brain.current) setModel({ ...brain.current.getModel() });
+      showToast({ text: "Couldn't delete that. Check your connection." });
     });
     showToast(
       {
@@ -397,11 +401,33 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
     sheetRef.current = sheet;
   }, [sheet]);
 
-  // On phones the sheet covers the bottom of the screen; lift the brain above it.
+  // Measure what the UI covers (chips on top; bar, results or sheet below) and
+  // centre the brain in the space that's left. Labels avoid covered bands.
+  const topRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    const resultsOpen = !!results && query.trim().length >= 2;
-    brain.current?.setViewShift(isMobile && ((sheet && sheet.kind !== "capture") || (!sheet && resultsOpen)) ? 0.22 : 0);
-  }, [isMobile, sheet, results, query]);
+    const measure = () => {
+      const h = window.innerHeight;
+      const top = topRef.current?.getBoundingClientRect().bottom ?? 110;
+      let bottomEdge = bottomRef.current?.getBoundingClientRect().top ?? h - 80;
+      const aside = asideRef.current?.getBoundingClientRect();
+      // On phones the sheet spans the width; on desktop it's a side panel.
+      if (aside && isMobile && sheet?.kind !== "capture") bottomEdge = Math.min(bottomEdge, aside.top);
+      if (!bottomRef.current && !aside) bottomEdge = h;
+      brain.current?.setOcclusion(top, Math.max(0, h - bottomEdge));
+      const visibleCentre = (top + bottomEdge) / 2;
+      brain.current?.setViewShift(Math.min(0.35, Math.max(0, (h / 2 - visibleCentre) / h)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    [topRef.current, bottomRef.current, asideRef.current].forEach((el) => el && observer.observe(el));
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [isMobile, sheet, results, query, focused, toast]);
 
   const thoughtCount = model.nodes.length;
   const selectedNode = sheet?.kind === "node" ? nodeById.get(sheet.id) : undefined;
@@ -462,7 +488,10 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
       )}
 
       {/* Top: menu, stats, regions */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 space-y-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
+      <div
+        ref={topRef}
+        className="pointer-events-none absolute inset-x-0 top-0 z-10 space-y-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))]"
+      >
         <div className="flex items-start justify-between gap-2">
           <div className="pointer-events-auto relative">
             <button
@@ -552,7 +581,7 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
 
       {/* Bottom: search / add */}
       {!(isMobile && sheet) && (
-        <div className="absolute inset-x-0 bottom-0 z-10 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        <div ref={bottomRef} className="absolute inset-x-0 bottom-0 z-10 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           {results && query.trim().length >= 2 && !sheet && (
             <SearchResults
               results={results}
@@ -622,6 +651,7 @@ export function BrainExperience({ userId, nodes, edges, startCapture = false }: 
       {/* Sheets: bottom on mobile, right panel on desktop */}
       {sheet && (
         <aside
+          ref={asideRef}
           key={sheet.kind === "node" ? sheet.id : sheet.kind}
           className="brain-sheet-in absolute inset-x-0 bottom-0 z-30 max-h-[62dvh] overflow-y-auto rounded-t-3xl border-t border-border bg-surface p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-xl md:inset-x-auto md:bottom-24 md:right-4 md:top-28 md:max-h-none md:w-96 md:rounded-3xl md:border"
         >
