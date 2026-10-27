@@ -7,7 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { embedLogs } from "@/lib/embeddings";
 import { normalizeUrl, parseTags } from "@/lib/format";
 import { fetchLinkTitle } from "@/lib/link-title";
-import { getLog, getNeighbors, searchLogIds, type LogWithImage } from "@/lib/queries";
+import { getLog, getNeighbors, searchBrain, type BrainSearchResult, type LogWithImage } from "@/lib/queries";
 import type { MapEdge, MapNode } from "@/lib/types";
 import { IMAGE_BUCKET } from "@/lib/types";
 
@@ -192,10 +192,24 @@ export async function savePositions(positions: { id: string; x: number; y: numbe
   }
 }
 
-export async function searchMap(query: string, semantic = true): Promise<string[]> {
+export async function searchMap(query: string, semantic = true): Promise<BrainSearchResult> {
   await requireUser();
   const q = query.trim();
-  return q ? searchLogIds(q, semantic) : [];
+  if (!q) return { query: "", hits: [], mode: "keyword", semanticUnavailable: false };
+  return searchBrain(q, semantic);
+}
+
+// One-tap tag suggestions after saving. Tags feed the embedding, so re-embed.
+export async function addTags(id: string, tags: string[]): Promise<string[] | null> {
+  const { supabase } = await requireUser();
+  const { data } = await supabase.from("logs").select("id, caption, tags").eq("id", id).single();
+  if (!data) return null;
+  const merged = [...new Set([...data.tags, ...parseTags(tags.join(","))])].slice(0, 20);
+  const { error } = await supabase.from("logs").update({ tags: merged }).eq("id", id);
+  if (error) return null;
+  await tryEmbed(supabase, { id, caption: data.caption, tags: merged });
+  revalidatePath("/list");
+  return merged;
 }
 
 export async function getLogDetail(id: string): Promise<LogWithImage | null> {

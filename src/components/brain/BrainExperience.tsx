@@ -3,12 +3,13 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition } from "react";
-import { getLogDetail, savePositions, searchMap, signOut, type ActionResult } from "@/app/actions";
+import { addTags, getLogDetail, savePositions, searchMap, signOut, type ActionResult } from "@/app/actions";
 import { LogForm } from "@/components/LogForm";
 import type { BrainHandle } from "@/components/brain/Brain3D";
+import { SearchResults } from "@/components/brain/SearchResults";
 import { buildBrain, type BrainModel } from "@/lib/brain-model";
 import { domainOf } from "@/lib/format";
-import type { LogWithImage } from "@/lib/queries";
+import type { BrainSearchResult, LogWithImage } from "@/lib/queries";
 import type { MapEdge, MapNode } from "@/lib/types";
 import { useMediaQuery } from "@/lib/use-media-query";
 
@@ -31,6 +32,27 @@ type Sheet = { kind: "node"; id: string } | { kind: "region"; id: number } | { k
 
 type Props = { userId: string; nodes: MapNode[]; edges: MapEdge[] };
 
+type Toast = { text: string; id?: string; suggestions?: string[] };
+
+const RECENT_KEY = "brain:recent";
+
+function readRecent(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function rememberSearch(q: string) {
+  try {
+    const next = [q, ...readRecent().filter((r) => r.toLowerCase() !== q.toLowerCase())].slice(0, 8);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // Storage blocked; recents just won't persist.
+  }
+}
+
 export function BrainExperience({ userId, nodes, edges }: Props) {
   const brain = useRef<BrainHandle>(null);
   // The renderer owns the live model after mount (it adds new thoughts itself),
@@ -43,12 +65,14 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<string[] | null>(null);
+  const [results, setResults] = useState<BrainSearchResult | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [recent, setRecent] = useState<string[]>([]);
   const [searching, startSearch] = useTransition();
   const [sheet, setSheet] = useState<Sheet>(null);
   const [trail, setTrail] = useState<string[]>([]);
   const [detail, setDetail] = useState<LogWithImage | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Server renders without the hint; the browser checks if it was dismissed.
@@ -89,9 +113,24 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
     [model],
   );
 
-  function showToast(text: string) {
-    setToast(text);
-    setTimeout(() => setToast((t) => (t === text ? null : t)), 4500);
+  function showToast(next: Toast) {
+    setToast(next);
+    // Linger longer when there are suggestions to tap.
+    setTimeout(() => setToast((t) => (t === next ? null : t)), next.suggestions?.length ? 9000 : 4500);
+  }
+
+  function acceptTag(tag: string) {
+    const current = toast;
+    if (!current?.id) return;
+    const id = current.id;
+    const remaining = current.suggestions?.filter((t) => t !== tag) ?? [];
+    setToast(remaining.length ? { ...current, suggestions: remaining } : { text: `Tagged #${tag}` });
+    addTags(id, [tag]).then((tags) => {
+      if (!tags) return;
+      const node = brain.current?.getModel().nodes.find((n) => n.id === id);
+      if (node) node.tags = tags;
+      if (brain.current) setModel({ ...brain.current.getModel() });
+    });
   }
 
   // --- Selecting a thought: it fires, the camera flies there, details load ---------
@@ -118,10 +157,11 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
     (q: string, semantic: boolean, fly: boolean) => {
       const seq = ++searchSeq.current;
       startSearch(async () => {
-        const ids = await searchMap(q, semantic);
+        const result = await searchMap(q, semantic);
         if (seq !== searchSeq.current) return; // a newer search started
-        const known = ids.filter((id) => nodeById.has(id));
-        setHits(known);
+        const known = result.hits.map((h) => h.id).filter((id) => nodeById.has(id));
+        setResults(result);
+        if (semantic && q.length >= 3) rememberSearch(q);
         if (known.length) {
           brain.current?.activate(known);
           if (fly) brain.current?.focusActivation();
@@ -136,8 +176,10 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
   useEffect(() => {
     const q = query.trim();
     if (q.length < 2) return;
+    // Words match instantly as you type; meaning (which costs an API call)
+    // waits until you've clearly stopped typing, or you press Enter.
     const live = setTimeout(() => runSearch(q, false, false), 250);
-    const full = setTimeout(() => runSearch(q, true, true), 1100);
+    const full = q.length >= 3 ? setTimeout(() => runSearch(q, true, true), 2500) : undefined;
     return () => {
       clearTimeout(live);
       clearTimeout(full);
@@ -148,7 +190,7 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
     setQuery(value);
     if (value.trim().length < 2) {
       searchSeq.current++;
-      setHits(null);
+      setResults(null);
       brain.current?.clearActivation();
     }
   }
@@ -186,13 +228,26 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
       .map((n) => nodeById.get(n.target)?.caption)
       .filter((c): c is string => !!c)
       .slice(0, 2);
-    showToast(
-      !result.embedded
+    // Suggest tags its new neighbours use (tags shape region names).
+    const counts = new Map<string, number>();
+    for (const n of result.neighbors) {
+      for (const t of nodeById.get(n.target)?.tags ?? []) {
+        if (!result.node.tags.includes(t)) counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    const suggestions = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([t]) => t);
+    showToast({
+      text: !result.embedded
         ? "Saved. It'll connect once it's processed."
         : linked.length
           ? `Connected to: ${linked.map((c) => (c.length > 38 ? `${c.slice(0, 37)}…` : c)).join(" · ")}`
           : "Saved. A new idea, unlike anything else in your brain yet.",
-    );
+      id: result.node.id,
+      suggestions,
+    });
     setTimeout(() => openNode(result.node.id), reducedMotion ? 50 : 2600);
   }
 
@@ -211,8 +266,9 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
 
   // On phones the sheet covers the bottom of the screen; lift the brain above it.
   useEffect(() => {
-    brain.current?.setViewShift(isMobile && sheet && sheet.kind !== "capture" ? 0.22 : 0);
-  }, [isMobile, sheet]);
+    const resultsOpen = !!results && query.trim().length >= 2;
+    brain.current?.setViewShift(isMobile && ((sheet && sheet.kind !== "capture") || (!sheet && resultsOpen)) ? 0.22 : 0);
+  }, [isMobile, sheet, results, query]);
 
   const thoughtCount = model.nodes.length;
   const selectedNode = sheet?.kind === "node" ? nodeById.get(sheet.id) : undefined;
@@ -256,7 +312,12 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
               2nd Brain
             </button>
             {menuOpen && (
-              <div className="brain-fade-in absolute left-0 top-12 w-48 overflow-hidden rounded-2xl border border-border bg-surface py-1 text-sm backdrop-blur">
+              <div className="brain-fade-in absolute left-0 top-12 w-56 overflow-hidden rounded-2xl border border-border bg-surface py-1 text-sm backdrop-blur">
+                {thoughtCount > 0 && (
+                  <p className="border-b border-border px-4 py-3 text-xs text-muted">
+                    <b className="text-text">{thoughtCount}</b> thoughts · <b className="text-text">{model.regions.length}</b> regions
+                  </p>
+                )}
                 <Link href="/list" className="block px-4 py-3 hover:bg-surface-2">
                   List view
                 </Link>
@@ -269,11 +330,6 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
               </div>
             )}
           </div>
-          {thoughtCount > 0 && (
-            <div className="pointer-events-auto rounded-full border border-border bg-surface px-3 py-2 text-xs text-muted backdrop-blur">
-              <b className="text-text">{thoughtCount}</b> thoughts · <b className="text-text">{model.regions.length}</b> regions
-            </div>
-          )}
         </div>
 
         {model.regions.length > 0 && (
@@ -312,37 +368,50 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
           role="status"
           className="brain-fade-in absolute inset-x-3 top-[calc(max(0.75rem,env(safe-area-inset-top))+6.5rem)] z-20 mx-auto max-w-md rounded-2xl border border-accent/40 bg-surface px-4 py-3 text-sm backdrop-blur"
         >
-          ✦ {toast}
+          ✦ {toast.text}
+          {toast.suggestions && toast.suggestions.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-muted">Add a tag?</span>
+              {toast.suggestions.map((t) => (
+                <button key={t} onClick={() => acceptTag(t)} className="rounded-full bg-accent-soft px-2.5 py-1 text-xs text-accent">
+                  + {t}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* Bottom: search / add */}
       {!(isMobile && sheet) && (
         <div className="absolute inset-x-0 bottom-0 z-10 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          {hits && query.trim().length >= 2 && (
-            <div className="brain-fade-in mx-auto mb-2 max-w-xl">
-              {hits.length ? (
-                <div className="-mx-3 flex gap-2 overflow-x-auto px-3 [scrollbar-width:none]">
-                  {hits.slice(0, 8).map((id) => {
-                    const n = nodeById.get(id);
-                    if (!n) return null;
-                    return (
-                      <button
-                        key={id}
-                        onClick={() => openNode(id)}
-                        className="flex h-9 max-w-[16rem] shrink-0 items-center gap-2 rounded-full border border-border bg-surface px-3 text-sm backdrop-blur"
-                      >
-                        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: n.color }} />
-                        <span className="truncate">{n.caption}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="w-fit rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted backdrop-blur">
-                  Nothing fires for that yet. Tap ＋ to log it.
-                </p>
-              )}
+          {results && query.trim().length >= 2 && (
+            <SearchResults
+              results={results}
+              model={model}
+              nodeById={nodeById}
+              searchingMeaning={searching && results.mode === "keyword"}
+              onOpen={(id) => openNode(id)}
+              onCapture={() => setSheet({ kind: "capture", prefill: query.trim() })}
+            />
+          )}
+          {focused && !query && recent.length > 0 && (
+            <div className="brain-fade-in mx-auto mb-2 flex max-w-xl items-center gap-2 overflow-x-auto [scrollbar-width:none]">
+              <span className="shrink-0 text-xs text-muted">Recent</span>
+              {recent.map((r) => (
+                <button
+                  key={r}
+                  // Fires before the input blurs, so the tap isn't lost.
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    setQuery(r);
+                    runSearch(r, true, true);
+                  }}
+                  className="h-9 shrink-0 rounded-full border border-border bg-surface px-3 text-sm backdrop-blur"
+                >
+                  {r}
+                </button>
+              ))}
             </div>
           )}
           <form onSubmit={submitSearch} className="mx-auto flex max-w-xl items-center gap-2">
@@ -353,6 +422,11 @@ export function BrainExperience({ userId, nodes, edges }: Props) {
                 enterKeyHint="search"
                 value={query}
                 onChange={(e) => onQueryChange(e.target.value)}
+                onFocus={() => {
+                  setFocused(true);
+                  setRecent(readRecent());
+                }}
+                onBlur={() => setFocused(false)}
                 placeholder={thoughtCount ? "Search your brain…" : "Type a thought, then tap ＋"}
                 aria-label="Search your brain"
                 className="h-12 w-full rounded-full border border-border bg-surface pl-5 pr-11 text-text [&::-webkit-search-cancel-button]:appearance-none shadow-[0_0_40px_rgba(94,230,208,0.08)] outline-none backdrop-blur placeholder:text-muted focus:border-accent"

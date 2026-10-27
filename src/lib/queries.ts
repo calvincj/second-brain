@@ -1,6 +1,7 @@
 import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import { embedQuery } from "@/lib/embeddings";
+import { cleanQuery } from "@/lib/search-query";
 import { fetchAll } from "@/lib/fetch-all";
 import { IMAGE_BUCKET, LOG_COLUMNS, type Log, type MapEdge, type MapNode } from "@/lib/types";
 
@@ -40,9 +41,10 @@ export async function getRecentLogs({ tag, limit = 100 }: { tag?: string; limit?
   return attachImageUrls(supabase, data as Log[]);
 }
 
-export async function searchLogs(query: string): Promise<LogWithImage[]> {
+export async function searchLogs(rawQuery: string): Promise<LogWithImage[]> {
   const supabase = await createClient();
-  const embedding = await embedQuery(query);
+  const query = cleanQuery(rawQuery);
+  const embedding = await embedQuery(query, supabase);
   const { data, error } = await supabase.rpc("hybrid_search", {
     query_text: query,
     query_embedding: embedding ? JSON.stringify(embedding) : null,
@@ -105,19 +107,35 @@ export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]
   };
 }
 
-// Search returning only ordered ids (the brain already has the nodes).
+export type BrainSearchResult = {
+  query: string; // what was actually searched, after cleaning
+  hits: { id: string; byMeaning: boolean }[];
+  // "semantic" = words + meaning; "keyword" = words only (by choice, or
+  // because the embedding API was unavailable/rate-limited).
+  mode: "semantic" | "keyword";
+  semanticUnavailable: boolean;
+};
+
+// Search for the brain, which already has the nodes and just needs ids.
 // semantic=false skips the embedding call: instant keyword-only matching for
 // live as-you-type previews (Voyage's free tier allows 3 requests/minute).
-export async function searchLogIds(query: string, semantic = true): Promise<string[]> {
+export async function searchBrain(rawQuery: string, semantic = true): Promise<BrainSearchResult> {
   const supabase = await createClient();
-  const embedding = semantic ? await embedQuery(query) : null;
+  const query = cleanQuery(rawQuery);
+  const embedding = semantic ? await embedQuery(query, supabase) : null;
   const { data, error } = await supabase.rpc("hybrid_search", {
     query_text: query,
     query_embedding: embedding ? JSON.stringify(embedding) : null,
     match_count: 20,
   });
   if (error) throw error;
-  return (data as { id: string }[]).map((r) => r.id);
+  const rows = data as { id: string; similarity: number | null; keyword_match?: boolean }[];
+  return {
+    query,
+    hits: rows.map((r) => ({ id: r.id, byMeaning: r.keyword_match === false })),
+    mode: embedding ? "semantic" : "keyword",
+    semanticUnavailable: semantic && !embedding,
+  };
 }
 
 export async function getTagCounts(): Promise<{ tag: string; n: number }[]> {

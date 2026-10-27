@@ -60,15 +60,52 @@ export function embeddingText(log: { caption: string; tags: string[] }) {
   return log.tags.length ? `${log.caption}\nTags: ${log.tags.join(", ")}` : log.caption;
 }
 
-// Embeds the query, or returns null so search can fall back to full-text only.
-export async function embedQuery(query: string): Promise<number[] | null> {
+// Recently embedded queries, per server instance.
+const queryCache = new Map<string, number[]>();
+const QUERY_CACHE_SIZE = 200;
+
+// Embeds a search query, or returns null so search can fall back to keywords.
+// Checks an in-memory cache, then the user's cached queries in the database,
+// before spending one of Voyage's (free tier: 3/minute) requests.
+export async function embedQuery(query: string, supabase?: SupabaseClient): Promise<number[] | null> {
+  const key = query.trim().toLowerCase();
+  const model = embeddingModel();
+  const memKey = `${model}:${key}`;
+  const hit = queryCache.get(memKey);
+  if (hit) return hit;
+
+  if (supabase) {
+    // Tolerates the cache table not existing yet (migration 0005 not run).
+    const { data } = await supabase
+      .from("query_embeddings")
+      .select("embedding")
+      .eq("model", model)
+      .eq("query", key)
+      .maybeSingle();
+    if (data?.embedding) {
+      const vector = typeof data.embedding === "string" ? (JSON.parse(data.embedding) as number[]) : (data.embedding as number[]);
+      remember(memKey, vector);
+      return vector;
+    }
+  }
+
   try {
-    const [vector] = await embed([query], "query");
+    const [vector] = await embed([key], "query");
+    remember(memKey, vector);
+    if (supabase) {
+      await supabase.from("query_embeddings").insert({ query: key, model, embedding: JSON.stringify(vector) });
+    }
     return vector;
   } catch (err) {
     console.error("Query embedding failed", err);
     return null;
   }
+}
+
+function remember(key: string, vector: number[]) {
+  queryCache.delete(key);
+  queryCache.set(key, vector);
+  if (queryCache.size > QUERY_CACHE_SIZE) queryCache.delete(queryCache.keys().next().value!);
 }
 
 // Embeds the given logs, writes the vectors back and refreshes each log's

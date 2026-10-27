@@ -225,7 +225,9 @@ try {
   await page.goto(APP + "/");
   await page.waitForSelector("canvas", { timeout: 20000 });
   check("brain renders a WebGL canvas", true);
-  check("stats show thought count", (await page.locator(`text=${COUNT}`).first().isVisible()));
+  await page.click('button[aria-label="Menu"]');
+  check("menu shows thought count", await page.locator(`text=${COUNT} thoughts`).isVisible().catch(() => false) || (await page.locator("p:has-text('thoughts ·')").innerText()).startsWith(String(COUNT)));
+  await page.click('button[aria-label="Menu"]');
   const regionChips = page.locator('nav[aria-label="Regions"] button');
   await page.waitForTimeout(500);
   check("regions formed", (await regionChips.count()) >= 2, `${await regionChips.count()} regions`);
@@ -240,9 +242,12 @@ try {
   await page.screenshot({ path: OUT + "01-brain.png" });
 
   await page.fill(brainInput, "cognitive bias");
-  await page.waitForTimeout(2500);
-  const hitChips = page.locator(`form:has(${brainInput})`).locator("xpath=..").locator("button:has(span.truncate)");
-  check("brain search lights up hits", (await hitChips.count()) >= 4, `${await hitChips.count()} hits`);
+  const panel = page.locator("text=thoughts about").locator("xpath=ancestor::div[contains(@class,'rounded-3xl')][1]");
+  await page.waitForSelector("text=thoughts about", { timeout: 15000 });
+  const hitChips = panel.locator("li button");
+  check("brain search shows readable results", (await hitChips.count()) >= 4, `${await hitChips.count()} hits`);
+  check("results show full captions", await panel.locator("text=Confirmation bias makes people favor information that confirms beliefs").isVisible());
+  await page.waitForTimeout(3000);
   await page.screenshot({ path: OUT + "02-brain-search.png" });
   await hitChips.first().click();
   await page.waitForSelector("text=Connected thoughts", { timeout: 5000 }).catch(() => {});
@@ -251,6 +256,18 @@ try {
   await page.screenshot({ path: OUT + "03-brain-thought.png" });
   await page.locator('aside button[aria-label="Close"]').click();
   await page.locator('button[aria-label="Clear search"]').click();
+
+  await page.fill(brainInput, "octopis");
+  await page.waitForSelector("text=about “octopis”", { timeout: 10000 }).catch(() => {});
+  await page.waitForSelector('text=thoughts about', { timeout: 10000 });
+  check("typos still find thoughts (octopis)", await page.locator("li button:has-text('Octopus')").first().isVisible());
+  await page.fill(brainInput, "what do I know about octopus?");
+  await page.waitForSelector('text=about "octopus"', { timeout: 10000 }).catch(() => {});
+  check("questions are understood", await page.locator("text=octopus”").first().isVisible().catch(() => false) || (await page.locator("li button:has-text('Octopus')").count()) > 0);
+  await page.locator('button[aria-label="Clear search"]').click();
+  await page.click(brainInput);
+  check("recent searches appear on focus", await page.locator("text=Recent").first().isVisible());
+  await page.locator(brainInput).blur();
 
   await regionChips.first().click();
   await page.waitForSelector("text=thoughts in this region");
@@ -268,11 +285,23 @@ try {
   const toast = await page.waitForSelector('[role="status"]', { timeout: 10000 });
   const toastText = await toast.innerText();
   check("birth toast says what it connected to", /Connected to:/.test(toastText), toastText.slice(0, 80));
-  await page.waitForSelector(`text=${COUNT + 1}`, { timeout: 5000 });
-  check("thought count goes up without reload", true);
+  const suggestion = page.locator('[role="status"] button').first();
+  const suggestedTag = (await suggestion.count()) ? (await suggestion.innerText()).replace("+", "").trim() : null;
+  check("toast suggests tags from neighbours", !!suggestedTag, suggestedTag ?? "none");
+  if (suggestedTag) {
+    await suggestion.click();
+    await page.waitForTimeout(1500);
+  }
+  await page.click('button[aria-label="Menu"]');
+  check("thought count goes up without reload", (await page.locator("p:has-text('thoughts ·')").innerText()).startsWith(String(COUNT + 1)));
+  await page.click('button[aria-label="Menu"]');
   await page.waitForTimeout(3500);
   check("new thought's card opens after it settles", await page.locator("aside >> text=taste with their suckers").isVisible());
   await page.screenshot({ path: OUT + "05-brain-birth.png" });
+  if (suggestedTag) {
+    const born = await (await admin(`/rest/v1/logs?select=tags&caption=eq.${encodeURIComponent("Octopuses can taste with their suckers")}`)).json();
+    check("tapping a suggestion adds the tag", born[0]?.tags.includes(suggestedTag), JSON.stringify(born[0]?.tags));
+  }
   const newPlaced = await (await admin("/rest/v1/logs?select=id&z=not.is.null")).json();
   check("new thought's position saved", newPlaced.length === COUNT + 1, `${newPlaced.length}`);
 

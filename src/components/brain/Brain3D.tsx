@@ -94,6 +94,8 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
   const visuals = useRef(new Map<string, Visual>());
   const pulses = useRef<Pulse[]>([]);
   const activation = useRef(new Map<string, Activation>());
+  // Only the strongest few lit neurons get a label, so text never piles up.
+  const labelled = useRef(new Set<string>());
   const selected = useRef<string | null>(null);
   const hovered = useRef<string | null>(null);
   const regionsRef = useRef<{ nebula: THREE.Sprite; label: SpriteText; labelBase: [number, number]; regionId: number }[]>([]);
@@ -249,7 +251,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
         const scale = v.baseScale * (1 + v.level * 0.6 + v.flash * 0.9 + (id === selected.current ? 0.35 : 0));
         v.glow.scale.set(scale, scale, 1);
         v.coreMaterial.opacity = dimmed ? 0.25 : 1;
-        const showLabel = id === selected.current || id === hovered.current || v.level > 0.45;
+        const showLabel = id === selected.current || id === hovered.current || labelled.current.has(id);
         if (showLabel && !v.label) attachLabel(id, v);
         if (v.label) {
           v.label.visible = showLabel;
@@ -578,6 +580,12 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     activate(seedIds, options) {
       const result = spreadActivation(seedIds, modelRef.current.links, options);
       activation.current = result;
+      labelled.current = new Set(
+        [...result.values()]
+          .sort((a, b) => b.level - a.level)
+          .slice(0, 5)
+          .map((a) => a.id),
+      );
       for (const [id, v] of visuals.current) v.target = result.get(id)?.level ?? 0;
       // Fire: seeds burst now, then the signal travels outward hop by hop.
       for (const a of result.values()) {
@@ -595,6 +603,7 @@ export default function Brain3D({ model, isMobile, reducedMotion, onSelect, onBa
     },
     clearActivation() {
       activation.current = new Map();
+      labelled.current = new Set();
       for (const v of visuals.current.values()) v.target = 0;
       refreshLinks();
     },
