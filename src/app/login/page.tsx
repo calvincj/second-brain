@@ -1,14 +1,29 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState, useTransition } from "react";
 import { createClient } from "@/lib/supabase/client";
+
+// Only same-site paths: "/capture?…" yes; "//evil.com", "/\\evil.com" or
+// "https://…" no.
+function safeNext(next: string | null) {
+  return next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/";
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
+  );
+}
 
 // Email + password: no emails to send (so no custom SMTP), and iOS Keychain
 // autofills it inside the home-screen app. Signups are disabled, so only the
 // account created in the Supabase dashboard can sign in.
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +41,7 @@ export default function LoginPage() {
         setError(error.message);
         return;
       }
-      router.replace("/");
+      router.replace(safeNext(searchParams.get("next")));
       router.refresh();
     });
   }

@@ -238,7 +238,12 @@ try {
     await page.waitForTimeout(500);
   }
   check("3D layout saved positions", placed.length === COUNT, `${placed.length}/${COUNT}`);
-  const settings = await (await admin("/rest/v1/brain_settings?select=layout_version")).json();
+  // Saved right after the positions it describes.
+  let settings = [];
+  for (let t = 0; t < 20 && !settings[0]?.layout_version; t++) {
+    settings = await (await admin("/rest/v1/brain_settings?select=layout_version")).json();
+    if (!settings[0]?.layout_version) await page.waitForTimeout(500);
+  }
   check("layout version saved for all devices", settings[0]?.layout_version?.length > 0, JSON.stringify(settings));
   await page.waitForTimeout(1500);
   await page.screenshot({ path: OUT + "01-brain.png" });
@@ -370,6 +375,34 @@ try {
   await page.waitForTimeout(5000);
   check("only one stir per day", (await page.locator("text=A memory stirs").count()) === 0);
 
+  // While you were away: a thought arrived (e.g. via a Shortcut) after the last visit.
+  await page.evaluate(() => localStorage.setItem("brain:lastVisit", String(Date.now() - 3600_000)));
+  const fresh = await (await admin("/rest/v1/logs", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ caption: "Arrived while away: honeybees can recognise faces", tags: ["biology"], user_id: (await (await admin("/auth/v1/admin/users")).json()).users[0].id }),
+  })).json();
+  await page.goto(APP + "/");
+  const awayCard = await page.waitForSelector("text=While you were away", { timeout: 25000 }).catch(() => null);
+  check("'while you were away' replays new thoughts", !!awayCard && (await page.locator("text=+1").count()) > 0);
+  if (awayCard) await page.screenshot({ path: OUT + "07-away.png" });
+  await page.locator('button:has-text("Nice")').click().catch(() => {});
+  await admin(`/rest/v1/logs?id=eq.${fresh[0].id}`, { method: "DELETE" });
+
+  // Bottom sheet: drag the handle down to dismiss.
+  await regionChips.first().click();
+  await page.waitForSelector("text=thoughts in this region");
+  const handle = page.locator("aside > div[aria-hidden]").first();
+  const box = await handle.boundingBox();
+  if (box) {
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + 200, { steps: 8 });
+    await page.mouse.up();
+  }
+  await page.waitForTimeout(600);
+  check("dragging the sheet down dismisses it", (await page.locator("text=thoughts in this region").count()) === 0);
+
   await page.goto(APP + "/?capture=1");
   await page.waitForSelector("text=New thought", { timeout: 20000 });
   check("/?capture=1 opens straight into logging", true);
@@ -404,6 +437,20 @@ try {
   await page.waitForTimeout(2500);
   const viaApi = await (await admin(`/rest/v1/logs?select=embedding_model,tags&id=eq.${goodJson.id}`)).json();
   check("API-captured thought gets connected", !!viaApi[0]?.embedding_model && viaApi[0]?.tags.includes("biology"), JSON.stringify(viaApi));
+  const listTags = await (await fetch(APP + "/api/capture", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "Tags as a list from Shortcuts", tags: ["alpha", "beta"] }),
+  })).json();
+  const listRow = await (await admin(`/rest/v1/logs?select=tags&id=eq.${listTags.id}`)).json();
+  check("capture API accepts tags as a list", JSON.stringify(listRow[0]?.tags) === '["alpha","beta"]', JSON.stringify(listRow));
+  let limited = false;
+  for (let i = 0; i < 12 && !limited; i++) {
+    const r = await fetch(APP + "/api/capture", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ text: `flood ${i}` }) });
+    limited = r.status === 429;
+  }
+  check("capture API rate-limits a flood", limited);
+  await admin(`/rest/v1/logs?caption=like.flood*`, { method: "DELETE" });
 
   // --- menu + sign out ------------------------------------------------------------------------
   await page.click('button[aria-label="Menu"]');
@@ -412,6 +459,16 @@ try {
   await page.waitForURL(/\/login/);
   await page.goto(APP + "/");
   check("after sign out, / redirects to login", page.url().endsWith("/login"));
+  // A Shortcut opening /capture while signed out: log in, land back on it, text intact.
+  await page.goto(APP + "/capture?text=" + encodeURIComponent("Kept through login"));
+  await page.waitForURL(/\/login\?next=/);
+  await page.fill('input[type="email"]', EMAIL);
+  await page.fill('input[type="password"]', PASSWORD);
+  await page.click('button:has-text("Sign in")');
+  await page.waitForURL(/\/capture/, { timeout: 20000 });
+  await page.waitForSelector("textarea", { timeout: 20000 });
+  await page.waitForTimeout(500);
+  check("login returns to /capture with the shared text", (await page.inputValue("textarea")) === "Kept through login");
 
   const errors = consoleErrors.filter((e) => !/React DevTools|favicon|GPU stall|WebGL/.test(e));
   check("no browser console errors", errors.length === 0, errors.slice(0, 3).join(" | ").slice(0, 300));

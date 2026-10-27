@@ -9,6 +9,8 @@ import {
   deleteLogInPlace,
   getLogDetail,
   restoreLog,
+  retryEmbeddingWithNeighbors,
+  revokeCaptureToken,
   saveLayoutVersion,
   savePositions,
   searchMap,
@@ -82,6 +84,22 @@ function pickMemory(m: BrainModel, now: number): { id: string; ago: string } | n
   const days = Math.round((now - Date.parse(pick.createdAt!)) / day);
   const ago = days < 7 ? `${days} days ago` : days < 60 ? `${Math.round(days / 7)} weeks ago` : `${Math.round(days / 30)} months ago`;
   return { id: pick.id, ago };
+}
+
+type Away = { ids: string[]; since: string; newRegions: string[]; milestone: number | null };
+
+// "While you were away": what arrived since this device's last visit.
+function whileAway(m: BrainModel, lastVisit: number, prevRegions: string[], prevCount: number): Away | null {
+  const ids = m.nodes
+    .filter((n) => n.createdAt && Date.parse(n.createdAt) > lastVisit)
+    .sort((a, b) => Date.parse(a.createdAt!) - Date.parse(b.createdAt!))
+    .map((n) => n.id);
+  if (!ids.length) return null;
+  const known = new Set(prevRegions);
+  const newRegions = m.regions.filter((r) => r.members.length && !known.has(r.name)).map((r) => r.name);
+  const milestone = [25, 50, 100, 250, 500, 1000].find((x) => prevCount < x && m.nodes.length >= x) ?? null;
+  const since = new Date(lastVisit).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return { ids, since, newRegions: prevRegions.length ? newRegions : [], milestone };
 }
 
 function rememberSearch(q: string) {
@@ -309,6 +327,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   function onQueryChange(value: string) {
     clearTimeout(birthTimer.current);
     setMemory(null);
+    setAway(null);
     setQuery(value);
     lastSemantic.current = null;
     setMeaningPending(false);
@@ -336,6 +355,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   function openRegion(id: number) {
     clearTimeout(birthTimer.current);
     setMemory(null);
+    setAway(null);
     const region = model.regions[id];
     if (!region) return;
     brain.current?.select(null);
@@ -434,6 +454,11 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   // --- "A memory stirs" ---------------------------------------------------------------
   // Once a day, an older thought you haven't looked at in a while wakes up.
   const [memory, setMemory] = useState<{ id: string; ago: string } | null>(null);
+  const [away, setAway] = useState<Away | null>(null);
+  // Bottom sheet on phones: dragged up to full height (per sheet), or down to dismiss.
+  const [fullFor, setFullFor] = useState<string | null>(null);
+  const [dragY, setDragY] = useState(0);
+  const drag = useRef<{ y: number; t: number } | null>(null);
   const stirredRef = useRef(false);
   // After the brain has settled into view, and only if you aren't already
   // doing something (searching, reading, logging, touching the brain).
@@ -441,8 +466,44 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
     if (stirredRef.current || startCapture) return;
     stirredRef.current = true;
     actedSinceSettle.current = false;
+
+    // Thoughts that failed to connect (e.g. the embedding quota was busy when
+    // a Shortcut logged them) get another try, gently spaced.
+    const stuck = (brain.current?.getModel() ?? initialModel).nodes.filter((n) => !n.embedded).slice(0, 2);
+    stuck.forEach((n, i) => {
+      setTimeout(async () => {
+        const neighbors = await retryEmbeddingWithNeighbors(n.id).catch(() => null);
+        if (!neighbors || !brain.current) return;
+        brain.current.updateThought({ id: n.id, caption: n.caption, tags: n.tags, x: null, y: null, z: null, embedded: true }, neighbors);
+        setModel({ ...brain.current.getModel() });
+      }, 5000 + i * 25000);
+    });
+
     setTimeout(() => {
+      const m = brain.current?.getModel() ?? initialModel;
+      let lastVisit = 0;
+      let prevRegions: string[] = [];
+      let prevCount = 0;
+      try {
+        lastVisit = Number(localStorage.getItem("brain:lastVisit") ?? 0);
+        prevRegions = JSON.parse(localStorage.getItem("brain:regions") ?? "[]");
+        prevCount = Number(localStorage.getItem("brain:count") ?? 0);
+        localStorage.setItem("brain:lastVisit", String(Date.now()));
+        localStorage.setItem("brain:regions", JSON.stringify(m.regions.filter((r) => r.members.length).map((r) => r.name)));
+        localStorage.setItem("brain:count", String(m.nodes.length));
+      } catch {
+        return;
+      }
       if (sheetRef.current || busyRef.current || actedSinceSettle.current) return;
+
+      // New thoughts since last time take the stage instead of a memory.
+      const summary = lastVisit ? whileAway(m, lastVisit, prevRegions, prevCount) : null;
+      if (summary) {
+        setAway(summary);
+        brain.current?.replayBirths(summary.ids);
+        return;
+      }
+
       const today = new Date().toDateString();
       try {
         if (localStorage.getItem("brain:stirred") === today) return;
@@ -450,7 +511,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
       } catch {
         return;
       }
-      const pick = pickMemory(brain.current?.getModel() ?? initialModel, Date.now());
+      const pick = pickMemory(m, Date.now());
       if (!pick) return;
       setMemory(pick);
       brain.current?.stir(pick.id);
@@ -524,6 +585,33 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
       window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [isMobile, sheet, results, query, focused, toast]);
+
+  const sheetKey = sheet ? (sheet.kind === "node" ? `node:${sheet.id}` : sheet.kind === "region" ? `region:${sheet.id}` : sheet.kind) : null;
+  const sheetFull = !!sheetKey && fullFor === sheetKey;
+
+  function onHandleDown(e: React.PointerEvent) {
+    if (!isMobile) return;
+    drag.current = { y: e.clientY, t: e.timeStamp };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function onHandleMove(e: React.PointerEvent) {
+    if (!drag.current) return;
+    setDragY(e.clientY - drag.current.y);
+  }
+  function onHandleUp(e: React.PointerEvent) {
+    if (!drag.current) return;
+    const dy = e.clientY - drag.current.y;
+    const velocity = dy / Math.max(1, e.timeStamp - drag.current.t);
+    drag.current = null;
+    setDragY(0);
+    if (dy > 90 || velocity > 0.6) {
+      if (sheetFull) setFullFor(null);
+      else if (sheet?.kind === "capture" || sheet?.kind === "shortcut") setSheet(null);
+      else closeSheet();
+    } else if (dy < -50) {
+      setFullFor(sheetKey);
+    }
+  }
 
   const thoughtCount = model.nodes.length;
   const selectedNode = sheet?.kind === "node" ? nodeById.get(sheet.id) : undefined;
@@ -660,6 +748,38 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
           </nav>
         )}
 
+        {away && !sheet && (
+          <div className="brain-fade-in pointer-events-auto mx-auto max-w-md rounded-2xl border border-accent/40 bg-surface p-4 backdrop-blur-xl">
+            <div className="flex items-start gap-3">
+              <span className="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-accent shadow-[0_0_12px_var(--accent)]" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-wide text-muted">While you were away · since {away.since}</p>
+                <p className="mt-1 leading-snug">
+                  <b>+{away.ids.length}</b> new thought{away.ids.length === 1 ? "" : "s"}
+                  {away.newRegions.length > 0 && <> · new region{away.newRegions.length === 1 ? "" : "s"}: {away.newRegions.join(", ")}</>}
+                  {away.milestone && <> · {away.milestone} thoughts ✦</>}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {away.ids.slice(0, 3).map((id) => (
+                    <button
+                      key={id}
+                      onClick={() => {
+                        setAway(null);
+                        openNode(id);
+                      }}
+                      className="max-w-full truncate rounded-full bg-accent-soft px-3 py-1.5 text-xs text-accent"
+                    >
+                      {nodeById.get(id)?.caption}
+                    </button>
+                  ))}
+                  <button onClick={() => setAway(null)} className="rounded-full px-3 py-1.5 text-xs text-muted">
+                    Nice
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {toast && (
           <div
             role="status"
@@ -798,6 +918,7 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
               type="button"
               onClick={() => {
                 setMemory(null);
+                setAway(null);
                 setSheet({ kind: "capture", prefill: query.trim() });
               }}
               aria-label="Log a new thought"
@@ -814,10 +935,19 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
         <aside
           ref={asideRef}
           key={sheet.kind === "node" ? sheet.id : sheet.kind}
-          className="brain-sheet-in absolute inset-x-0 bottom-0 z-30 max-h-[62dvh] overflow-y-auto rounded-t-3xl border-t border-border bg-surface p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-xl md:inset-x-auto md:bottom-24 md:right-4 md:top-28 md:max-h-none md:w-96 md:rounded-3xl md:border"
+          style={dragY > 0 ? { transform: `translateY(${dragY}px)`, transition: "none" } : undefined}
+          className={`brain-sheet-in absolute inset-x-0 bottom-0 z-30 ${sheetFull ? "max-h-[90dvh]" : "max-h-[62dvh]"} overflow-y-auto rounded-t-3xl transition-[max-height] duration-300 border-t border-border bg-surface p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-xl md:inset-x-auto md:bottom-24 md:right-4 md:top-28 md:max-h-none md:w-96 md:rounded-3xl md:border`}
         >
-          <div className="mb-2 flex items-center justify-between">
-            <span className="mx-auto h-1 w-10 rounded-full bg-border md:hidden" />
+          {/* Drag handle: up to expand, down to dismiss. */}
+          <div
+            onPointerDown={onHandleDown}
+            onPointerMove={onHandleMove}
+            onPointerUp={onHandleUp}
+            onPointerCancel={onHandleUp}
+            className="-mx-4 -mt-4 mb-1 flex h-8 touch-none items-center justify-center md:hidden"
+            aria-hidden
+          >
+            <span className="h-1 w-10 rounded-full bg-border" />
           </div>
 
           {sheet.kind === "shortcut" && <ShortcutSetup onClose={() => setSheet(null)} />}
@@ -1017,6 +1147,7 @@ function ShortcutSetup({ onClose }: { onClose: () => void }) {
   const [token, setToken] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [revoked, setRevoked] = useState(false);
   const [pending, startTransition] = useTransition();
   const endpoint = typeof window !== "undefined" ? `${window.location.origin}/api/capture` : "/api/capture";
 
@@ -1078,6 +1209,19 @@ function ShortcutSetup({ onClose }: { onClose: () => void }) {
         </div>
       )}
       {error && <p className="mt-3 text-danger">Couldn&rsquo;t create a token. Has migration 0008 been run?</p>}
+      <button
+        onClick={() =>
+          startTransition(async () => {
+            if (await revokeCaptureToken()) {
+              setToken(null);
+              setRevoked(true);
+            }
+          })
+        }
+        className="mt-5 block text-xs text-muted underline-offset-2 hover:underline"
+      >
+        {revoked ? "Token revoked. Shortcuts using it will stop working." : "Revoke my token"}
+      </button>
     </div>
   );
 }

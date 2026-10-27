@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { ActionResult } from "@/app/actions";
 import { LogForm } from "@/components/LogForm";
@@ -10,6 +11,7 @@ type Saved = Extract<ActionResult, { ok: true }>;
 // The fast lane: just the form, no 3D. Opened from the home screen, an iOS
 // Shortcut ("/capture?text=…&url=…") or the Share Sheet.
 export function CaptureView({ userId, text, url }: { userId: string; text: string; url: string }) {
+  const router = useRouter();
   const [saved, setSaved] = useState<Saved | null>(null);
   const [round, setRound] = useState(0);
 
@@ -45,6 +47,8 @@ export function CaptureView({ userId, text, url }: { userId: string; text: strin
         onSaved={(r) => {
           setSaved(r);
           setRound((n) => n + 1);
+          // Drop ?text= so a reload (iOS restoring the tab) can't save it twice.
+          router.replace("/capture");
         }}
       />
     </div>

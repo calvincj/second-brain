@@ -43,24 +43,33 @@ export function LogForm({ userId, logId, initial, prefill, prefillUrl, autoFocus
   const fileInput = useRef<HTMLInputElement>(null);
   const captionInput = useRef<HTMLTextAreaElement>(null);
 
-  // Restore an unsent draft (new logs only). Done after mount rather than in a
-  // lazy initializer so server and client render the same initial HTML.
+  // Prefilled forms (shared text, typed search) leave the saved draft alone.
+  const prefilled = !!(prefill || prefillUrl);
+
+  // Restore an unsent draft (new logs only), or apply the prefill. Done after
+  // mount so server and client render the same initial HTML.
   useEffect(() => {
     if (isEdit) return;
-    const draft = readDraft();
     /* eslint-disable react-hooks/set-state-in-effect */
-    if (prefill) setCaption(prefill);
-    else if (draft.caption) setCaption(draft.caption);
+    if (prefilled) {
+      if (prefill) setCaption(prefill);
+      if (prefillUrl) {
+        setSourceUrl(prefillUrl);
+        setShowExtras(true);
+      }
+      return;
+    }
+    const draft = readDraft();
+    if (draft.caption) setCaption(draft.caption);
     if (draft.tags) setTags(draft.tags);
-    if (prefillUrl) setSourceUrl(prefillUrl);
-    else if (draft.sourceUrl) setSourceUrl(draft.sourceUrl);
-    if (draft.tags || draft.sourceUrl || prefillUrl) setShowExtras(true);
+    if (draft.sourceUrl) setSourceUrl(draft.sourceUrl);
+    if (draft.tags || draft.sourceUrl) setShowExtras(true);
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [isEdit, prefill, prefillUrl]);
+  }, [isEdit, prefilled, prefill, prefillUrl]);
 
   // Autosave the draft so a flaky connection never loses typing.
   useEffect(() => {
-    if (isEdit) return;
+    if (isEdit || prefilled) return;
     try {
       if (caption || tags || sourceUrl) {
         localStorage.setItem(DRAFT_KEY, JSON.stringify({ caption, tags, sourceUrl }));
@@ -70,7 +79,7 @@ export function LogForm({ userId, logId, initial, prefill, prefillUrl, autoFocus
     } catch {
       // Storage unavailable (private mode); drafts just won't persist.
     }
-  }, [isEdit, caption, tags, sourceUrl]);
+  }, [isEdit, prefilled, caption, tags, sourceUrl]);
 
   function pickImage(file: File | undefined) {
     if (!file) return;

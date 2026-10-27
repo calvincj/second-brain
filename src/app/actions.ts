@@ -156,14 +156,19 @@ export async function updateLog(id: string, input: LogInput): Promise<ActionResu
 }
 
 export async function retryEmbedding(id: string): Promise<boolean> {
+  return (await retryEmbeddingWithNeighbors(id)) !== null;
+}
+
+// For the brain: on success, the thought's new connections so it can wire in.
+export async function retryEmbeddingWithNeighbors(id: string): Promise<MapEdge[] | null> {
   const { supabase } = await requireUser();
   const { data } = await supabase.from("logs").select("id, caption, tags").eq("id", id).single();
-  if (!data) return false;
+  if (!data) return null;
   const embedded = await tryEmbed(supabase, data);
   revalidatePath("/");
   revalidatePath("/list");
   revalidatePath(`/log/${id}`);
-  return embedded;
+  return embedded ? getNeighbors(id) : null;
 }
 
 // Soft delete: the log disappears everywhere at once (RLS hides it) and the
@@ -259,6 +264,12 @@ export async function createCaptureToken(): Promise<string | null> {
     .from("brain_settings")
     .upsert({ user_id: user.id, capture_token_hash: hash, updated_at: new Date().toISOString() });
   return error ? null : token;
+}
+
+export async function revokeCaptureToken(): Promise<boolean> {
+  const { supabase, user } = await requireUser();
+  const { error } = await supabase.from("brain_settings").update({ capture_token_hash: null }).eq("user_id", user.id);
+  return !error;
 }
 
 // Which layout rules the saved positions follow, shared by every device.

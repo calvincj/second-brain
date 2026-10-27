@@ -41,6 +41,9 @@ export type BrainHandle = {
   setOcclusion: (top: number, bottom: number, right: number) => void;
   // "A memory stirs": drift to an old thought and let it glow.
   stir: (id: string) => void;
+  // "While you were away": thoughts that arrived since your last visit fire
+  // one after another.
+  replayBirths: (ids: string[]) => void;
 };
 
 export type RemovedThought = { node: BrainNode; links: BrainLink[]; region: number | null };
@@ -143,6 +146,20 @@ export default function Brain3D({
   mobileRef.current = isMobile;
   // The most recent framing request, re-run when the UI's covered area changes.
   const lastFrame = useRef<{ ids: string[] | null; at: number }>({ ids: null, at: 0 });
+  // Delayed camera/glow work that any user action cancels.
+  const pendingTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  function later(fn: () => void, ms: number) {
+    const t = setTimeout(() => {
+      pendingTimers.current = pendingTimers.current.filter((x) => x !== t);
+      fn();
+    }, ms);
+    pendingTimers.current.push(t);
+  }
+  function cancelPending() {
+    pendingTimers.current.forEach(clearTimeout);
+    pendingTimers.current = [];
+    fitOnStop.current = false;
+  }
   const callbacks = useRef({ onSelect, onBackground, onPositionsSettled, onReady, onSettled });
   callbacks.current = { onSelect, onBackground, onPositionsSettled, onReady, onSettled };
   const settledOnce = useRef(false);
@@ -311,7 +328,7 @@ export default function Brain3D({
     lastInteraction.current = performance.now();
     // Touching the brain means the user is in charge: no automatic re-framing.
     const onTouch = () => {
-      fitOnStop.current = false;
+      cancelPending();
       wakeUp();
     };
     el.addEventListener("pointerdown", onTouch);
@@ -806,8 +823,14 @@ export default function Brain3D({
     // horizontal plane.
     const box = new THREE.Box3().setFromPoints(nodes.map(pos));
     const c = box.getCenter(new THREE.Vector3());
-    const halfY = Math.max(15, (box.max.y - box.min.y) / 2) + 8;
-    const radXZ = Math.max(15, ...nodes.map((n) => Math.hypot((n.x ?? 0) - c.x, (n.z ?? 0) - c.z))) + 8;
+    // For the whole brain, fit the 85th percentile: a lone outlier may sit
+    // slightly off-screen rather than shrink everything else.
+    const extent = (values: number[]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return ids || sorted.length < 8 ? sorted[sorted.length - 1] : sorted[Math.floor(sorted.length * 0.85)];
+    };
+    const halfY = Math.max(15, extent(nodes.map((n) => Math.abs((n.y ?? 0) - c.y)))) + 8;
+    const radXZ = Math.max(15, extent(nodes.map((n) => Math.hypot((n.x ?? 0) - c.x, (n.z ?? 0) - c.z)))) + 8;
     const camera = graph.camera() as THREE.PerspectiveCamera;
     // Fit into the part of the screen the UI leaves visible.
     const W = graph.width();
@@ -916,7 +939,7 @@ export default function Brain3D({
       .graphData({ nodes, links: model.links });
     buildRegions();
     refreshLinks();
-    setTimeout(() => frameThoughts(null, firstLayout ? 1500 : 900), firstLayout ? 2500 : 300);
+    later(() => frameThoughts(null, firstLayout ? 1500 : 900), firstLayout ? 2500 : 300);
     setTimeout(() => callbacks.current.onReady?.(), 0);
     // Only data changes re-apply the scene (a resize mid-settle must not pin
     // half-settled positions); helpers only touch refs.
@@ -927,6 +950,7 @@ export default function Brain3D({
   useImperativeHandle(ref, () => ({
     activate(seedIds, options) {
       wakeRef.current();
+      cancelPending();
       const result = spreadActivation(seedIds, modelRef.current.links, options);
       activation.current = result;
       labelled.current = new Set(
@@ -952,6 +976,7 @@ export default function Brain3D({
     },
     clearActivation() {
       wakeRef.current();
+      cancelPending();
       activation.current = new Map();
       labelled.current = new Set();
       for (const v of visuals.current.values()) v.target = 0;
@@ -959,7 +984,7 @@ export default function Brain3D({
     },
     flyToNode(id) {
       wakeRef.current();
-      fitOnStop.current = false;
+      cancelPending();
       lastFrame.current.at = 0; // a flight, not a framing: never re-frame over it
       const graph = graphRef.current;
       const n = nodeById(id);
@@ -980,7 +1005,7 @@ export default function Brain3D({
     // Frame everything that lit up, so you see the signal spread.
     focusActivation() {
       wakeRef.current();
-      fitOnStop.current = false;
+      cancelPending();
       const graph = graphRef.current;
       const lit = activation.current;
       if (!graph || !lit.size) return;
@@ -992,7 +1017,7 @@ export default function Brain3D({
     },
     flyToRegion(regionId) {
       wakeRef.current();
-      fitOnStop.current = false;
+      cancelPending();
       const graph = graphRef.current;
       const region = modelRef.current.regions[regionId];
       if (!graph || !region) return;
@@ -1011,9 +1036,28 @@ export default function Brain3D({
     getModel() {
       return modelRef.current;
     },
+    replayBirths(ids) {
+      wakeRef.current();
+      cancelPending();
+      const order = ids.filter((id) => nodeById(id));
+      if (!order.length) return;
+      frameThoughts(order.length > 1 ? order : null, 1200);
+      order.forEach((id, i) => {
+        later(() => {
+          const n = nodeById(id);
+          const v = visuals.current.get(id);
+          if (!n || !v) return;
+          v.flash = 1;
+          neighborsOf(id).forEach((nb, j) => {
+            const other = nodeById(nb);
+            if (other) spawnPulse(n, other, j * 150, 650);
+          });
+        }, reducedMotion ? 0 : 1300 + i * 700);
+      });
+    },
     stir(id) {
       wakeRef.current();
-      fitOnStop.current = false;
+      cancelPending();
       lastFrame.current.at = 0; // a flight, not a framing: never re-frame over it
       const graph = graphRef.current;
       const n = nodeById(id);
@@ -1026,7 +1070,7 @@ export default function Brain3D({
       const to = target.clone().add(dir.multiplyScalar(mobileRef.current ? 190 : 150));
       graph.cameraPosition({ x: to.x, y: to.y, z: to.z }, { x: target.x, y: target.y, z: target.z }, reducedMotion ? 0 : 2600);
       // It wakes: a soft glow that swells, then signals to its neighbours.
-      setTimeout(() => {
+      later(() => {
         v.target = 0.7;
         v.flash = 0.8;
         labelled.current = new Set([id]);
