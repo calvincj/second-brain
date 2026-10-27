@@ -90,18 +90,23 @@ type MapLogRow = {
   embedding_model: string | null;
   created_at: string;
   last_viewed_at?: string | null;
+  region_anchor?: string | null;
 };
 
-// Reads logs for the map, tolerating migration 0007 (last_viewed_at) not
-// having been run yet.
+// Reads logs for the map, tolerating newer migrations (0007 last_viewed_at,
+// 0009 region_anchor) not having been run yet.
 async function fetchMapLogs(supabase: Supabase): Promise<MapLogRow[]> {
   const page = (cols: string) => (from: number, to: number) =>
     supabase.from("logs").select(cols).order("created_at").order("id").range(from, to);
-  try {
-    return await fetchAll<MapLogRow>(page("id, caption, tags, x, y, z, embedding_model, created_at, last_viewed_at") as never);
-  } catch {
-    return fetchAll<MapLogRow>(page("id, caption, tags, x, y, z, embedding_model, created_at") as never);
+  const base = "id, caption, tags, x, y, z, embedding_model, created_at";
+  for (const extra of [", last_viewed_at, region_anchor", ", last_viewed_at", ""]) {
+    try {
+      return await fetchAll<MapLogRow>(page(base + extra) as never);
+    } catch (err) {
+      if (!extra) throw err;
+    }
   }
+  return [];
 }
 
 export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]; layoutVersion: string | null }> {
@@ -130,6 +135,7 @@ export async function getMapData(): Promise<{ nodes: MapNode[]; edges: MapEdge[]
       embedded: !!l.embedding_model,
       createdAt: l.created_at,
       lastViewedAt: l.last_viewed_at ?? null,
+      regionAnchor: l.region_anchor ?? null,
     })),
     edges: neighbors.map((n) => ({ source: n.log_id, target: n.neighbor_id, similarity: n.similarity })),
     layoutVersion: settings.error ? null : (settings.data?.layout_version ?? ""),

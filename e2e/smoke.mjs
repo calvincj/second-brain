@@ -389,6 +389,23 @@ try {
   await page.locator('button:has-text("Nice")').click().catch(() => {});
   await admin(`/rest/v1/logs?id=eq.${fresh[0].id}`, { method: "DELETE" });
 
+  // Move to region: pin a thought into another region.
+  await page.locator('nav[aria-label="Thoughts by region"] button').first().evaluate((b) => b.click());
+  await page.waitForSelector("aside select", { timeout: 10000 });
+  const select = page.locator("aside select");
+  const current = await select.inputValue();
+  const options = await select.locator("option").evaluateAll((os) => os.map((o) => o.value));
+  const targetRegion = options.find((v) => v !== current && v !== "");
+  if (targetRegion != null) {
+    await select.selectOption(targetRegion);
+    const moved = await page.waitForSelector('[role="status"] >> text=Moved to', { timeout: 8000 }).catch(() => null);
+    const pinned = await (await admin("/rest/v1/logs?select=id&region_anchor=not.is.null")).json();
+    check("move to region saves a pin", !!moved && pinned.length === 1, `${pinned.length} pinned`);
+  } else {
+    check("move to region saves a pin", false, "only one region");
+  }
+  await page.locator('aside button[aria-label="Close"]').click();
+
   // Bottom sheet: drag the handle down to dismiss.
   await regionChips.first().click();
   await page.waitForSelector("text=thoughts in this region");

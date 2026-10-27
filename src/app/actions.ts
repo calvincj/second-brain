@@ -162,8 +162,10 @@ export async function retryEmbedding(id: string): Promise<boolean> {
 // For the brain: on success, the thought's new connections so it can wire in.
 export async function retryEmbeddingWithNeighbors(id: string): Promise<MapEdge[] | null> {
   const { supabase } = await requireUser();
-  const { data } = await supabase.from("logs").select("id, caption, tags").eq("id", id).single();
+  const { data } = await supabase.from("logs").select("id, caption, tags, embedding_model").eq("id", id).single();
   if (!data) return null;
+  // Already embedded (e.g. by the capture API meanwhile): no API call needed.
+  if (data.embedding_model) return getNeighbors(id);
   const embedded = await tryEmbed(supabase, data);
   revalidatePath("/");
   revalidatePath("/list");
@@ -264,6 +266,14 @@ export async function createCaptureToken(): Promise<string | null> {
     .from("brain_settings")
     .upsert({ user_id: user.id, capture_token_hash: hash, updated_at: new Date().toISOString() });
   return error ? null : token;
+}
+
+// "Move to region": pin a thought to another thought's region (anchor), or
+// to itself to take it out of regions; null clears the pin.
+export async function setRegionAnchor(id: string, anchor: string | null): Promise<boolean> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("logs").update({ region_anchor: anchor }).eq("id", id);
+  return !error;
 }
 
 export async function revokeCaptureToken(): Promise<boolean> {

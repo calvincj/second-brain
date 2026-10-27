@@ -219,7 +219,19 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
     }
     if (!changed) break;
   }
-  const sortedGroups = regionGroups.sort((a, b) => b.length - a.length);
+  // "Move to region": a pinned thought joins its anchor's region (or leaves
+  // regions entirely when pinned to itself).
+  for (const n of nodes) {
+    if (!n.regionAnchor) continue;
+    const from = groupOf.get(n.id);
+    const to = n.regionAnchor === n.id ? undefined : groupOf.get(n.regionAnchor);
+    if (from === to) continue;
+    if (from) from.splice(from.indexOf(n.id), 1);
+    if (to) to.push(n.id);
+    groupOf.delete(n.id);
+    if (to) groupOf.set(n.id, to);
+  }
+  const sortedGroups = regionGroups.filter((g) => g.length > 0).sort((a, b) => b.length - a.length);
   const names = nameRegions(sortedGroups, byId, nodes);
   const colors = stableColors(sortedGroups);
   const regions: Region[] = sortedGroups.map((members, i) => ({
@@ -240,6 +252,7 @@ export function buildBrain(nodes: MapNode[], edges: MapEdge[]): BrainModel {
       embedded: n.embedded,
       createdAt: n.createdAt,
       lastViewedAt: n.lastViewedAt,
+      regionAnchor: n.regionAnchor,
       x: n.x ?? undefined,
       y: n.y ?? undefined,
       z: n.z ?? undefined,

@@ -13,6 +13,7 @@ import {
   revokeCaptureToken,
   saveLayoutVersion,
   savePositions,
+  setRegionAnchor,
   searchMap,
   signOut,
   type ActionResult,
@@ -21,6 +22,7 @@ import { LogForm } from "@/components/LogForm";
 import type { BrainHandle, RemovedThought } from "@/components/brain/Brain3D";
 import { SearchResults } from "@/components/brain/SearchResults";
 import { buildBrain, type BrainModel } from "@/lib/brain-model";
+import { readMine } from "@/lib/mine";
 import { domainOf } from "@/lib/format";
 import type { BrainSearchResult, LogWithImage } from "@/lib/queries";
 import type { MapEdge, MapNode } from "@/lib/types";
@@ -88,19 +90,68 @@ function pickMemory(m: BrainModel, now: number): { id: string; ago: string } | n
 
 type Away = { ids: string[]; since: string; newRegions: string[]; milestone: number | null };
 
-// "While you were away": what arrived since this device's last visit.
-function whileAway(m: BrainModel, lastVisit: number, prevRegions: string[], prevCount: number): Away | null {
+// "While you were away": what arrived since this device's last visit, not
+// counting thoughts logged on this device (you saw those being born).
+function whileAway(m: BrainModel, lastVisit: number, prevCount: number, mine: Set<string>): Away | null {
+  const isNew = (n: BrainModel["nodes"][number]) => !!n.createdAt && Date.parse(n.createdAt) > lastVisit;
   const ids = m.nodes
-    .filter((n) => n.createdAt && Date.parse(n.createdAt) > lastVisit)
+    .filter((n) => isNew(n) && !mine.has(n.id))
     .sort((a, b) => Date.parse(a.createdAt!) - Date.parse(b.createdAt!))
     .map((n) => n.id);
   if (!ids.length) return null;
-  const known = new Set(prevRegions);
-  const newRegions = m.regions.filter((r) => r.members.length && !known.has(r.name)).map((r) => r.name);
+  // A region is new when most of it is new (names alone change with tags).
+  const byId = new Map(m.nodes.map((n) => [n.id, n]));
+  const newRegions = m.regions
+    .filter((r) => r.members.length >= 2 && r.members.filter((id) => isNew(byId.get(id)!)).length > r.members.length / 2)
+    .map((r) => r.name);
   const milestone = [25, 50, 100, 250, 500, 1000].find((x) => prevCount < x && m.nodes.length >= x) ?? null;
   const since = new Date(lastVisit).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  return { ids, since, newRegions: prevRegions.length ? newRegions : [], milestone };
+  return { ids, since, newRegions, milestone };
 }
+
+
+
+// Thoughts that failed to connect (e.g. the embedding quota was busy when a
+// Shortcut logged them) get another try: gently spaced, at most every 10
+// minutes per thought, and not for brand-new ones still being processed.
+function scheduleRetries(
+  brain: React.RefObject<BrainHandle | null>,
+  initialModel: BrainModel,
+  setModel: (m: BrainModel) => void,
+  timers: React.RefObject<ReturnType<typeof setTimeout>[]>,
+) {
+  const now = Date.now();
+  const recentlyTried = (id: string) => {
+    try {
+      return now - Number(localStorage.getItem(`brain:retry:${id}`) ?? 0) < 10 * 60_000;
+    } catch {
+      return true;
+    }
+  };
+  const stuck = (brain.current?.getModel() ?? initialModel).nodes
+    .filter((n) => !n.embedded && (!n.createdAt || now - Date.parse(n.createdAt) > 2 * 60_000) && !recentlyTried(n.id))
+    .slice(0, 2);
+  stuck.forEach((n, i) => {
+    timers.current.push(
+      setTimeout(async () => {
+        try {
+          localStorage.setItem(`brain:retry:${n.id}`, String(Date.now()));
+        } catch {
+          // Storage blocked.
+        }
+        const neighbors = await retryEmbeddingWithNeighbors(n.id).catch(() => null);
+        // Read the thought as it is now (it may have been edited or deleted).
+        const latest = brain.current?.getModel().nodes.find((x) => x.id === n.id);
+        if (!neighbors || !brain.current || !latest) return;
+        brain.current.updateThought(
+          { id: latest.id, caption: latest.caption, tags: latest.tags, x: null, y: null, z: null, embedded: true },
+          neighbors,
+        );
+        setModel({ ...brain.current.getModel() });
+      }, 5000 + i * 25000),
+    );
+  });
+  }
 
 function rememberSearch(q: string) {
   try {
@@ -144,6 +195,8 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
   const birthTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const measureRef = useRef<() => void>(() => {});
   const actedSinceSettle = useRef(false);
+  const retryTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  useEffect(() => () => retryTimers.current.forEach(clearTimeout), []);
   const busyRef = useRef(false);
   const pendingTags = useRef<{ id: string; tags: string[]; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // Server renders without the hint; the browser checks if it was dismissed.
@@ -399,6 +452,19 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
     birthTimer.current = setTimeout(() => openNode(result.node.id, { auto: true }), reducedMotion ? 50 : 2600);
   }
 
+  // "Move to region": pinned to a thought in the target region (stable even
+  // when regions are recomputed), or to itself for "no region".
+  function moveThought(id: string, regionId: number | null) {
+    const target = regionId == null ? null : model.regions[regionId];
+    const anchor = target ? (target.members.find((m) => m !== id) ?? null) : id;
+    if (regionId != null && !anchor) return;
+    brain.current?.moveToRegion(id, regionId);
+    if (brain.current) setModel({ ...brain.current.getModel() });
+    setRegionAnchor(id, anchor).then((ok) => {
+      showToast({ text: ok ? (target ? `Moved to ${target.name}.` : "Taken out of its region.") : "Couldn't save that move." }, 2500);
+    });
+  }
+
   // --- Edit and delete without leaving the brain ---------------------------------------
   function onEdited(result: Extract<ActionResult, { ok: true }>) {
     brain.current?.updateThought(result.node, result.neighbors);
@@ -468,36 +534,36 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
     actedSinceSettle.current = false;
 
     // Thoughts that failed to connect (e.g. the embedding quota was busy when
-    // a Shortcut logged them) get another try, gently spaced.
-    const stuck = (brain.current?.getModel() ?? initialModel).nodes.filter((n) => !n.embedded).slice(0, 2);
-    stuck.forEach((n, i) => {
-      setTimeout(async () => {
-        const neighbors = await retryEmbeddingWithNeighbors(n.id).catch(() => null);
-        if (!neighbors || !brain.current) return;
-        brain.current.updateThought({ id: n.id, caption: n.caption, tags: n.tags, x: null, y: null, z: null, embedded: true }, neighbors);
-        setModel({ ...brain.current.getModel() });
-      }, 5000 + i * 25000);
-    });
+    // a Shortcut logged them) get another try: gently spaced, at most every
+    // 10 minutes per thought, and not for brand-new ones still being processed.
+    setTimeout(() => scheduleRetries(brain, initialModel, setModel, retryTimers), 0);
 
     setTimeout(() => {
       const m = brain.current?.getModel() ?? initialModel;
       let lastVisit = 0;
-      let prevRegions: string[] = [];
       let prevCount = 0;
+      let mine = new Set<string>();
       try {
         lastVisit = Number(localStorage.getItem("brain:lastVisit") ?? 0);
-        prevRegions = JSON.parse(localStorage.getItem("brain:regions") ?? "[]");
         prevCount = Number(localStorage.getItem("brain:count") ?? 0);
-        localStorage.setItem("brain:lastVisit", String(Date.now()));
-        localStorage.setItem("brain:regions", JSON.stringify(m.regions.filter((r) => r.members.length).map((r) => r.name)));
-        localStorage.setItem("brain:count", String(m.nodes.length));
+        mine = readMine();
       } catch {
         return;
       }
+      // Busy: leave the bookmark alone so the summary shows next time.
       if (sheetRef.current || busyRef.current || actedSinceSettle.current) return;
+      const markVisited = () => {
+        try {
+          localStorage.setItem("brain:lastVisit", String(Date.now()));
+          localStorage.setItem("brain:count", String(m.nodes.length));
+        } catch {
+          // Storage blocked.
+        }
+      };
 
       // New thoughts since last time take the stage instead of a memory.
-      const summary = lastVisit ? whileAway(m, lastVisit, prevRegions, prevCount) : null;
+      const summary = lastVisit ? whileAway(m, lastVisit, prevCount, mine) : null;
+      markVisited();
       if (summary) {
         setAway(summary);
         brain.current?.replayBirths(summary.ids);
@@ -731,11 +797,18 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
         </div>
 
         {model.regions.length > 0 && (
-          <nav aria-label="Regions" className="pointer-events-auto -mx-3 flex gap-2 overflow-x-auto px-3 pb-1 [scrollbar-width:none]">
+          <nav
+            aria-label="Regions"
+            // Fades at the right edge: there are more chips to scroll to.
+            className="pointer-events-auto -mx-3 flex gap-2 overflow-x-auto px-3 pb-1 [mask-image:linear-gradient(to_right,#000_85%,transparent)] [scrollbar-width:none]"
+          >
             {model.regions.filter((r) => r.members.length > 0).map((r) => (
               <button
                 key={r.id}
-                onClick={() => openRegion(r.id)}
+                onClick={(e) => {
+                  e.currentTarget.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+                  openRegion(r.id);
+                }}
                 className={`flex h-9 shrink-0 items-center gap-2 rounded-full border bg-surface px-3 text-sm backdrop-blur ${
                   region?.id === r.id ? "border-text" : "border-border"
                 }`}
@@ -935,7 +1008,9 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
         <aside
           ref={asideRef}
           key={sheet.kind === "node" ? sheet.id : sheet.kind}
-          style={dragY > 0 ? { transform: `translateY(${dragY}px)`, transition: "none" } : undefined}
+          // `translate` (not transform): the slide-in animation's fill would
+          // otherwise override it, and the sheet wouldn't follow the finger.
+          style={{ translate: `0 ${Math.max(0, dragY)}px`, transition: dragY ? "none" : "translate 0.2s ease-out" }}
           className={`brain-sheet-in absolute inset-x-0 bottom-0 z-30 ${sheetFull ? "max-h-[90dvh]" : "max-h-[62dvh]"} overflow-y-auto rounded-t-3xl transition-[max-height] duration-300 border-t border-border bg-surface p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-xl md:inset-x-auto md:bottom-24 md:right-4 md:top-28 md:max-h-none md:w-96 md:rounded-3xl md:border`}
         >
           {/* Drag handle: up to expand, down to dismiss. */}
@@ -943,8 +1018,12 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
             onPointerDown={onHandleDown}
             onPointerMove={onHandleMove}
             onPointerUp={onHandleUp}
-            onPointerCancel={onHandleUp}
-            className="-mx-4 -mt-4 mb-1 flex h-8 touch-none items-center justify-center md:hidden"
+            onPointerCancel={() => {
+              drag.current = null;
+              setDragY(0);
+            }}
+            // Sticky, so it stays grabbable after scrolling a long list.
+            className="sticky -top-4 z-10 -mx-4 -mt-4 mb-1 flex h-8 touch-none items-center justify-center rounded-t-3xl bg-surface md:hidden"
             aria-hidden
           >
             <span className="h-1 w-10 rounded-full bg-border" />
@@ -1094,6 +1173,26 @@ export function BrainExperience({ userId, nodes, edges, layoutVersion, startCapt
               )}
 
               {!selectedNode.embedded && <p className="mt-3 text-xs text-muted">Not connected yet, so it floats at the edge for now.</p>}
+
+              {selectedNode.embedded && model.regions.length > 0 && (
+                <label className="mt-4 flex items-center gap-2 text-xs text-muted">
+                  Region
+                  <select
+                    value={selectedNode.region ?? ""}
+                    onChange={(e) => moveThought(selectedNode.id, e.target.value === "" ? null : Number(e.target.value))}
+                    className="h-9 rounded-full border border-border bg-surface-2 px-3 text-sm text-text outline-none"
+                  >
+                    {model.regions
+                      .filter((r) => r.members.length > 0 || r.id === selectedNode.region)
+                      .map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name}
+                        </option>
+                      ))}
+                    <option value="">No region</option>
+                  </select>
+                </label>
+              )}
 
               {neighborsOf(selectedNode.id).length > 0 && (
                 <>

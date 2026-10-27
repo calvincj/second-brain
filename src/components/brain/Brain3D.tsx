@@ -44,6 +44,8 @@ export type BrainHandle = {
   // "While you were away": thoughts that arrived since your last visit fire
   // one after another.
   replayBirths: (ids: string[]) => void;
+  // "Move to region": regionId null takes it out of regions.
+  moveToRegion: (id: string, regionId: number | null) => void;
 };
 
 export type RemovedThought = { node: BrainNode; links: BrainLink[]; region: number | null };
@@ -1036,12 +1038,25 @@ export default function Brain3D({
     getModel() {
       return modelRef.current;
     },
+    moveToRegion(id, regionId) {
+      wakeRef.current();
+      const n = nodeById(id);
+      if (!n) return;
+      setRegion(n, regionId);
+      setModel({ ...modelRef.current });
+      // Let it drift over to its new neighbours.
+      rewire([id]);
+      const v = visuals.current.get(id);
+      if (v) v.flash = 1;
+    },
     replayBirths(ids) {
       wakeRef.current();
       cancelPending();
       const order = ids.filter((id) => nodeById(id));
       if (!order.length) return;
-      frameThoughts(order.length > 1 ? order : null, 1200);
+      // Frame connected ones (unprocessed captures sit far out on the shell).
+      const connected = order.filter((id) => nodeById(id)?.embedded);
+      frameThoughts(connected.length > 1 ? connected : null, 1200);
       order.forEach((id, i) => {
         later(() => {
           const n = nodeById(id);

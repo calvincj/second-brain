@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { createLog, updateLog, type ActionResult, type LogInput } from "@/app/actions";
 import { createClient } from "@/lib/supabase/client";
 import { resizeImage } from "@/lib/image";
+import { rememberMine } from "@/lib/mine";
 import { IMAGE_BUCKET } from "@/lib/types";
 
 const DRAFT_KEY = "second-brain:draft";
@@ -129,6 +130,7 @@ export function LogForm({ userId, logId, initial, prefill, prefillUrl, autoFocus
           return;
         }
         if (!isEdit) {
+          rememberMine(result.id);
           setCaption("");
           setTags("");
           setSourceUrl("");

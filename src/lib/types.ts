@@ -26,6 +26,7 @@ export type MapNode = {
   embedded: boolean;
   createdAt?: string;
   lastViewedAt?: string | null;
+  regionAnchor?: string | null;
 };
 
 export type MapEdge = { source: string; target: string; similarity: number };

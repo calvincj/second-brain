@@ -49,9 +49,14 @@ export async function proxy(request: NextRequest) {
   }
 
   if (user && pathname === "/login") {
-    const url = request.nextUrl.clone();
-    url.pathname = "/";
-    return NextResponse.redirect(url);
+    // Already signed in: go where the link was headed (same-site only).
+    const next = request.nextUrl.searchParams.get("next");
+    let target = new URL("/", request.url);
+    if (next?.startsWith("/")) {
+      const candidate = new URL(next, request.url);
+      if (candidate.origin === target.origin) target = candidate;
+    }
+    return NextResponse.redirect(target);
   }
 
   return response;

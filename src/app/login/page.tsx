@@ -4,10 +4,16 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, useTransition } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-// Only same-site paths: "/capture?…" yes; "//evil.com", "/\\evil.com" or
-// "https://…" no.
+// Only same-site destinations: resolve it like the browser will (which
+// strips tabs/newlines and treats "/\\" as "//") and require our origin.
 function safeNext(next: string | null) {
-  return next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/";
+  if (!next || !next.startsWith("/")) return "/";
+  try {
+    const url = new URL(next, window.location.origin);
+    return url.origin === window.location.origin ? url.pathname + url.search + url.hash : "/";
+  } catch {
+    return "/";
+  }
 }
 
 export default function LoginPage() {
